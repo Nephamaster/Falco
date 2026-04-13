@@ -2,3 +2,10 @@ langchain
 langchain-openai
 langchain-tavily
 langgraph
+langchain-milvus
+langchain-text-splitters
+pymilvus
+sentence-transformers
+python-dotenv
+fastapi
+uvicorn[standard]
