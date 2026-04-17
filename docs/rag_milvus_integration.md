@@ -6,9 +6,9 @@
 - Hybrid retrieval support (dense + sparse/BM25 when Milvus server supports built-in sparse)
 - Query construction and optimization (LLM-based rewrite + sub-query expansion + keyword extraction)
 - Cross-encoder reranking (`sentence-transformers` cross encoder)
-- Connected into Falco tools:
-  - `rag_search(query, top_k)`
-  - `rag_index(path, drop_old)`
+- Connected into Falco as the enabled `rag` skill:
+  - `use_skill(skill_name="rag", action="search", args={"query": "...", "top_k": 5})`
+  - `use_skill(skill_name="rag", action="index", args={"path": "knowledge", "drop_old": false})`
 - API endpoints:
   - `POST /api/v1/rag/search`
   - `POST /api/v1/rag/index`
@@ -31,12 +31,13 @@ FALCO_RAG_RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
 Use CLI:
 
 ```bash
-python src/rag_cli.py index --path knowledge --drop-old
+python -m harness.rag_cli index --path knowledge --drop-old
 ```
 
-Or via agent tool:
+Or via agent skill:
 
-- Ask Falco: `请先调用 rag_index(path="knowledge", drop_old=true) 建库`
+- Ask Falco to use the `rag` skill with action `index`.
+- Indexing updates the local knowledge base and requires human approval.
 
 Or via API:
 
@@ -51,7 +52,13 @@ curl -X POST http://127.0.0.1:8000/api/v1/rag/index \
 CLI:
 
 ```bash
-python src/rag_cli.py search --query "你的问题" --top-k 5
+python -m harness.rag_cli search --query "memory design" --top-k 5
+```
+
+Agent skill:
+
+```text
+use_skill(skill_name="rag", action="search", args={"query": "memory design", "top_k": 5})
 ```
 
 API:
@@ -59,7 +66,7 @@ API:
 ```bash
 curl -X POST http://127.0.0.1:8000/api/v1/rag/search \
   -H "Content-Type: application/json" \
-  -d "{\"query\":\"你的问题\", \"top_k\":5}"
+  -d "{\"query\":\"memory design\", \"top_k\":5}"
 ```
 
 ## Important note on hybrid retrieval

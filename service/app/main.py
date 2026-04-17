@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from collections.abc import AsyncIterator
 
 from fastapi import FastAPI
@@ -13,6 +14,7 @@ from service.app.schemas import (
     ChatRequest,
     ChatResponse,
     HealthResponse,
+    MCPCatalogResponse,
     RAGIndexRequest,
     RAGIndexResponse,
     RAGSearchRequest,
@@ -22,18 +24,46 @@ from service.app.schemas import (
 
 app = FastAPI(title="Falco Service", version="0.1.0")
 
+
+def _cors_origins() -> list[str]:
+    raw = os.getenv("FALCO_CORS_ORIGINS", "http://127.0.0.1:1357,http://localhost:1357")
+    origins = [item.strip() for item in raw.split(",") if item.strip()]
+    return origins or ["http://127.0.0.1:1357"]
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
+def _resolve_workspace_path(workspace_root, raw_path: str):
+    target = (workspace_root / raw_path).resolve()
+    try:
+        rel = target.relative_to(workspace_root.resolve())
+    except ValueError as exc:
+        raise ValueError("Path escapes workspace root.") from exc
+    blocked_parts = {".git", ".falco", ".next", ".venv", "__pycache__", "node_modules", "venv"}
+    if set(rel.parts) & blocked_parts or target.name.startswith(".env") or target.suffix.lower() in {".pem", ".key"}:
+        raise ValueError("Refusing to index sensitive or generated path.")
+    return target
+
+
 @app.get("/api/v1/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     return HealthResponse(status="ok", service="falco-api")
+
+
+@app.get("/api/v1/mcp/catalog", response_model=MCPCatalogResponse)
+def mcp_catalog() -> MCPCatalogResponse:
+    orchestrator = runtime.get_orchestrator()
+    mcp = getattr(orchestrator, "mcp", None)
+    if mcp is None:
+        return MCPCatalogResponse(result="MCP registry is not configured.")
+    return MCPCatalogResponse(result=mcp.catalog())
 
 
 @app.post("/api/v1/chat", response_model=ChatResponse)
@@ -86,6 +116,9 @@ def rag_index(payload: RAGIndexRequest) -> RAGIndexResponse:
     rag = getattr(orchestrator, "rag", None)
     if rag is None:
         return RAGIndexResponse(message="RAG is disabled.")
-    target = (orchestrator.settings.workspace_root / payload.path).resolve()
+    try:
+        target = _resolve_workspace_path(orchestrator.settings.workspace_root, payload.path)
+    except ValueError as exc:
+        return RAGIndexResponse(message=str(exc))
     message = rag.index_paths([target], drop_old=payload.drop_old)
     return RAGIndexResponse(message=message)

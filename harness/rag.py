@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -8,7 +9,8 @@ from langchain_core.documents import Document
 from langchain_openai import OpenAIEmbeddings
 from pydantic import BaseModel, Field
 
-from config import FalcoSettings
+from harness.config.config import FalcoSettings
+from harness.prompts.templates import RAG_QUERY_OPTIMIZATION_PROMPT_TEMPLATE
 
 
 ALLOWED_KNOWLEDGE_EXTENSIONS = {
@@ -23,6 +25,34 @@ ALLOWED_KNOWLEDGE_EXTENSIONS = {
     ".toml",
     ".log",
 }
+
+SKIPPED_KNOWLEDGE_DIRS = {
+    ".git",
+    ".hg",
+    ".svn",
+    ".falco",
+    ".next",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    "venv",
+}
+
+SKIPPED_KNOWLEDGE_FILES = {
+    ".env",
+    ".env.local",
+    ".env.production",
+    ".env.development",
+}
+
+SKIPPED_KNOWLEDGE_SUFFIXES = {
+    ".pem",
+    ".key",
+    ".p12",
+    ".pfx",
+}
+
+MAX_KNOWLEDGE_FILE_BYTES = 2_000_000
 
 
 class QueryPlan(BaseModel):
@@ -118,17 +148,11 @@ class MilvusRAG:
         if self.llm is None:
             return fallback
 
-        prompt = (
-            "You are a retrieval query optimizer. Rewrite and expand user query for RAG.\n"
-            "Output JSON with fields: rewritten_query, sub_queries (<=3), keywords (<=8).\n"
-            "Keep language aligned with original query."
-        )
-
         try:
             planner = self.llm.with_structured_output(QueryPlan)
             plan = planner.invoke(
                 [
-                    {"role": "system", "content": prompt},
+                    {"role": "system", "content": RAG_QUERY_OPTIMIZATION_PROMPT_TEMPLATE},
                     {"role": "user", "content": query},
                 ]
             )
@@ -201,11 +225,22 @@ class MilvusRAG:
             if root.is_file():
                 files = [root]
             else:
-                files = [path for path in root.rglob("*") if path.is_file()]
+                files = []
+                for dirpath, dirnames, filenames in os.walk(root):
+                    dirnames[:] = [name for name in dirnames if name not in SKIPPED_KNOWLEDGE_DIRS]
+                    current = Path(dirpath)
+                    for name in filenames:
+                        files.append(current / name)
             for path in files:
+                if any(part in SKIPPED_KNOWLEDGE_DIRS for part in path.parts):
+                    continue
+                if path.name in SKIPPED_KNOWLEDGE_FILES or path.suffix.lower() in SKIPPED_KNOWLEDGE_SUFFIXES:
+                    continue
                 if path.suffix.lower() not in ALLOWED_KNOWLEDGE_EXTENSIONS:
                     continue
                 try:
+                    if path.stat().st_size > MAX_KNOWLEDGE_FILE_BYTES:
+                        continue
                     text = path.read_text(encoding="utf-8")
                 except Exception:
                     continue

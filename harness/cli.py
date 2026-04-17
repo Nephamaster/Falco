@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from config import FalcoSettings
-from orchestrator import FalcoOrchestrator
+from harness.agents.secretary.wake import FalcoOrchestrator
+from harness.config.config import FalcoSettings
 
 
 def main() -> None:

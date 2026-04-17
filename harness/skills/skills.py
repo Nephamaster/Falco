@@ -24,6 +24,7 @@ class SkillManager:
         self.root = root
         self.root.mkdir(parents=True, exist_ok=True)
         self._ensure_default_skill()
+        self._ensure_rag_skill()
 
     def _ensure_default_skill(self) -> None:
         default_path = self.root / "default_planning.md"
@@ -41,6 +42,31 @@ class SkillManager:
                     "2) Build the smallest viable execution plan.",
                     "3) Execute with tool-first actions.",
                     "4) Validate outputs before returning.",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+    def _ensure_rag_skill(self) -> None:
+        rag_path = self.root / "rag.md"
+        if rag_path.exists():
+            return
+        rag_path.write_text(
+            "\n".join(
+                [
+                    "---",
+                    "name: rag",
+                    "description: Local knowledge retrieval and indexing skill.",
+                    "enabled: true",
+                    "---",
+                    "Use this skill when the task needs local knowledge-base evidence or indexing.",
+                    "",
+                    "Actions available through `use_skill`:",
+                    "- search: args={\"query\": \"...\", \"top_k\": 5}",
+                    "- index: args={\"path\": \"knowledge\", \"drop_old\": false}",
+                    "",
+                    "Prefer search before answering questions that depend on local documents.",
+                    "Indexing changes the knowledge base and requires human approval.",
                 ]
             ),
             encoding="utf-8",

@@ -18,14 +18,9 @@ class FalcoRuntime:
                 return self._orchestrator
 
             root = Path(__file__).resolve().parents[2]
-            src_path = root / "src"
-            import sys
 
-            if str(src_path) not in sys.path:
-                sys.path.insert(0, str(src_path))
-
-            from config import FalcoSettings
-            from orchestrator import FalcoOrchestrator
+            from harness.agents.secretary.wake import FalcoOrchestrator
+            from harness.config.config import FalcoSettings
 
             settings = FalcoSettings.from_env(workspace_root=root)
             self._orchestrator = FalcoOrchestrator(settings=settings)

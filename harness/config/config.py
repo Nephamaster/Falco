@@ -2,8 +2,13 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from dotenv import load_dotenv
 from pathlib import Path
+
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError:
+    def load_dotenv() -> bool:
+        return False
 
 
 load_dotenv()
@@ -47,6 +52,9 @@ class FalcoSettings:
     rag_top_k: int = 5
     rag_fetch_k: int = 18
     rag_reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    mcp_enabled: bool = False
+    mcp_config_path: Path | None = None
+    mcp_tool_prefix: bool = True
 
     @classmethod
     def from_env(cls, workspace_root: str | Path | None = None) -> "FalcoSettings":
@@ -88,4 +96,10 @@ class FalcoSettings:
                 "FALCO_RAG_RERANKER_MODEL",
                 "cross-encoder/ms-marco-MiniLM-L-6-v2",
             ),
+            mcp_enabled=os.getenv("FALCO_MCP_ENABLED", "false").lower() == "true",
+            mcp_config_path=_resolve_rooted_path(
+                root,
+                os.getenv("FALCO_MCP_CONFIG", str(root / ".falco" / "mcp.json")),
+            ),
+            mcp_tool_prefix=os.getenv("FALCO_MCP_TOOL_PREFIX", "true").lower() == "true",
         )

@@ -1,5 +1,6 @@
 langchain
 langchain-openai
+langchain-mcp-adapters
 langchain-tavily
 langgraph
 langchain-milvus

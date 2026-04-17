@@ -3,9 +3,18 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from config import FalcoSettings
-from rag import MilvusRAG
+from harness.config.config import FalcoSettings
+from harness.rag import MilvusRAG
 from langchain_openai import ChatOpenAI
+
+
+def _resolve_workspace_path(root: Path, raw_path: str) -> Path:
+    target = (root / raw_path).resolve()
+    try:
+        target.relative_to(root.resolve())
+    except ValueError as exc:
+        raise SystemExit(f"Path escapes workspace root: {raw_path}") from exc
+    return target
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,7 +43,7 @@ def main() -> None:
     rag = MilvusRAG(settings=settings, llm=llm)
 
     if args.command == "index":
-        target = (Path(settings.workspace_root) / args.path).resolve()
+        target = _resolve_workspace_path(Path(settings.workspace_root), args.path)
         print(rag.index_paths([target], drop_old=args.drop_old))
         return
 

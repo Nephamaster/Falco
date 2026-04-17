@@ -18,6 +18,10 @@ class HealthResponse(BaseModel):
     service: str
 
 
+class MCPCatalogResponse(BaseModel):
+    result: str
+
+
 class RAGSearchRequest(BaseModel):
     query: str = Field(min_length=1)
     top_k: int = Field(default=5, ge=1, le=12)

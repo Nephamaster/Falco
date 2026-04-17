@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import math
 import re
-from dataclasses import dataclass
+import threading
+import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -43,10 +45,34 @@ class SilentTurnDecision(BaseModel):
     evergreen_note: str = Field(default="")
 
 
-class DailyLogDecision(BaseModel):
+class DailyLogRecordDecision(BaseModel):
     should_write: bool = Field(default=False)
-    note: str = Field(default="")
+    summary: str = Field(default="")
+    category: str = Field(default="conversation")
+    confidence: float = Field(default=0.7, ge=0, le=1)
     facts: list[str] = Field(default_factory=list)
+    decisions: list[str] = Field(default_factory=list)
+    tasks: list[str] = Field(default_factory=list)
+    user_preferences: list[str] = Field(default_factory=list)
+    constraints: list[str] = Field(default_factory=list)
+    artifacts: list[str] = Field(default_factory=list)
+    next_actions: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+
+
+class ReflectionDecision(BaseModel):
+    should_write: bool = Field(default=False)
+    lesson: str = Field(default="")
+    trigger: str = Field(default="")
+    recommendation: str = Field(default="")
+    confidence: float = Field(default=0.7, ge=0, le=1)
+    tags: list[str] = Field(default_factory=list)
+
+
+DAILY_LOG_SCHEMA_VERSION = 2
+EVERGREEN_SCHEMA_VERSION = 2
+EVERGREEN_USER_MODULE = "user"
+EVERGREEN_REFLECTION_MODULE = "agent_reflections"
 
 
 @dataclass
@@ -62,15 +88,13 @@ class ConversationMemoryManager:
     daily_lookback_days: int = 180
     daily_retrieval_items: int = 8
     evergreen_retrieval_items: int = 5
+    _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         self.daily_root.mkdir(parents=True, exist_ok=True)
         if not self.evergreen_path.exists():
-            self.evergreen_path.write_text(
-                json.dumps({"entries": [], "updated_at": _utc_now()}, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            self._write_json_atomic(self.evergreen_path, self._empty_evergreen())
 
     @property
     def daily_root(self) -> Path:
@@ -108,27 +132,26 @@ class ConversationMemoryManager:
 
     def save(self, thread_id: str, memory: dict) -> None:
         memory["updated_at"] = _utc_now()
-        self._path(thread_id).write_text(
-            json.dumps(memory, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        self._write_json_atomic(self._path(thread_id), memory)
 
     def add_fact(self, thread_id: str, note: str) -> None:
-        memory = self.load(thread_id)
-        facts = memory.setdefault("facts", [])
-        facts.append({"ts": _utc_now(), "note": note.strip()})
-        memory["facts"] = facts[-self.max_facts :]
-        self.save(thread_id, memory)
+        with self._lock:
+            memory = self.load(thread_id)
+            facts = memory.setdefault("facts", [])
+            facts.append({"ts": _utc_now(), "note": note.strip()})
+            memory["facts"] = facts[-self.max_facts :]
+            self.save(thread_id, memory)
 
     def append_turn(self, thread_id: str, role: str, content: str) -> None:
         text = content.strip()
         if not text:
             return
-        memory = self.load(thread_id)
-        history = memory.setdefault("history", [])
-        history.append({"ts": _utc_now(), "role": role, "content": text})
-        memory["history"] = history[-self.max_history :]
-        self.save(thread_id, memory)
+        with self._lock:
+            memory = self.load(thread_id)
+            history = memory.setdefault("history", [])
+            history.append({"ts": _utc_now(), "role": role, "content": text})
+            memory["history"] = history[-self.max_history :]
+            self.save(thread_id, memory)
 
     def add_round(
         self,
@@ -143,65 +166,68 @@ class ConversationMemoryManager:
         if not user_text and not assistant_text:
             return
 
-        memory = self.load(thread_id)
-        turns = memory.setdefault("turns", [])
-        turn_id = len(turns) + 1
-        score_info = self._score_importance(user_text, assistant_text, llm=llm)
-        turn = {
-            "id": turn_id,
-            "ts": _utc_now(),
-            "user": user_text,
-            "assistant": assistant_text,
-            "importance": score_info.score,
-            "importance_reason": score_info.reason,
-            "is_key": score_info.score >= self.importance_threshold,
-        }
-        turns.append(turn)
-        memory["turns"] = turns[-self.max_rounds :]
+        with self._lock:
+            memory = self.load(thread_id)
+            turns = memory.setdefault("turns", [])
+            turn_id = len(turns) + 1
+            score_info = self._score_importance(user_text, assistant_text, llm=llm)
+            turn = {
+                "id": turn_id,
+                "ts": _utc_now(),
+                "user": user_text,
+                "assistant": assistant_text,
+                "importance": score_info.score,
+                "importance_reason": score_info.reason,
+                "is_key": score_info.score >= self.importance_threshold,
+            }
+            turns.append(turn)
+            memory["turns"] = turns[-self.max_rounds :]
 
-        summary = memory.get("global_summary", "")
-        memory["global_summary"] = self._update_global_summary(
-            summary=summary,
-            turn=turn,
-            llm=llm,
-        )
-
-        history = memory.setdefault("history", [])
-        if user_text:
-            history.append({"ts": turn["ts"], "role": "user", "content": user_text})
-        if assistant_text:
-            history.append({"ts": turn["ts"], "role": "assistant", "content": assistant_text})
-        memory["history"] = history[-self.max_history :]
-
-        daily_note = self._extract_daily_log_note(
-            user=user_text,
-            assistant=assistant_text,
-            importance=int(turn["importance"]),
-            llm=llm,
-        )
-        if daily_note is not None:
-            self._append_daily_entry(
-                day=_today_str(),
-                entry={
-                    "ts": turn["ts"],
-                    "thread_id": thread_id,
-                    "type": "round_valuable",
-                    "importance": int(turn["importance"]),
-                    "note": self._truncate(daily_note["note"], 500),
-                    "facts": [self._truncate(item, 160) for item in daily_note.get("facts", [])][:6],
-                },
+            summary = memory.get("global_summary", "")
+            memory["global_summary"] = self._update_global_summary(
+                summary=summary,
+                turn=turn,
+                llm=llm,
             )
 
-        evergreen_note = self._extract_evergreen_note(user_text, assistant_text)
-        if evergreen_note:
-            self._append_evergreen_entry(
-                note=evergreen_note,
-                importance=max(6, int(turn["importance"])),
-                source="round",
-                thread_id=thread_id,
-            )
+            history = memory.setdefault("history", [])
+            if user_text:
+                history.append({"ts": turn["ts"], "role": "user", "content": user_text})
+            if assistant_text:
+                history.append({"ts": turn["ts"], "role": "assistant", "content": assistant_text})
+            memory["history"] = history[-self.max_history :]
 
-        self.save(thread_id, memory)
+            daily_record = self._extract_daily_log_record(
+                user=user_text,
+                assistant=assistant_text,
+                importance=int(turn["importance"]),
+                llm=llm,
+            )
+            if daily_record is not None:
+                self._append_daily_record(
+                    day=_today_str(),
+                    record=self._build_daily_record(
+                        thread_id=thread_id,
+                        source="dialogue_turn",
+                        importance=int(turn["importance"]),
+                        decision=daily_record,
+                        ts=turn["ts"],
+                        turn_id=int(turn["id"]),
+                        raw_user=user_text,
+                        raw_assistant=assistant_text,
+                    ),
+                )
+
+            evergreen_note = self._extract_evergreen_note(user_text, assistant_text)
+            if evergreen_note:
+                self._append_evergreen_entry(
+                    note=evergreen_note,
+                    importance=max(6, int(turn["importance"])),
+                    source="round",
+                    thread_id=thread_id,
+                )
+
+            self.save(thread_id, memory)
 
     def maybe_run_silent_turn_compaction(
         self,
@@ -213,56 +239,64 @@ class ConversationMemoryManager:
         silent_turn_cooldown_rounds: int,
         query_hint: str = "",
     ) -> None:
-        memory = self.load(thread_id)
-        turns = memory.get("turns", [])
-        if not turns:
-            return
+        with self._lock:
+            memory = self.load(thread_id)
+            turns = memory.get("turns", [])
+            if not turns:
+                return
 
-        latest_turn_id = int(turns[-1].get("id", 0))
-        last_silent = int(memory.get("last_silent_turn_id", 0))
-        if latest_turn_id - last_silent < max(1, silent_turn_cooldown_rounds):
-            return
+            latest_turn_id = int(turns[-1].get("id", 0))
+            last_silent = int(memory.get("last_silent_turn_id", 0))
+            if latest_turn_id - last_silent < max(1, silent_turn_cooldown_rounds):
+                return
 
-        snapshot = self.build_context_block(
-            thread_id=thread_id,
-            max_items=self.max_facts,
-            recent_rounds=self.recent_rounds,
-            key_rounds=self.key_rounds,
-            query_hint=query_hint,
-            max_chars=context_max_chars * 2,
-        )
-        if len(snapshot) < context_soft_limit_chars:
-            return
-
-        decision = self._silent_turn_decision(
-            llm=llm,
-            summary=memory.get("global_summary", ""),
-            context_snapshot=snapshot,
-            latest_turn=turns[-1],
-        )
-        if decision.compressed_summary.strip():
-            memory["global_summary"] = decision.compressed_summary.strip()[:1800]
-        memory["last_silent_turn_id"] = latest_turn_id
-        self.save(thread_id, memory)
-
-        if decision.write_daily and decision.daily_note.strip():
-            self._append_daily_entry(
-                day=_today_str(),
-                entry={
-                    "ts": _utc_now(),
-                    "thread_id": thread_id,
-                    "type": "silent",
-                    "importance": max(self.importance_threshold, int(turns[-1].get("importance", 7))),
-                    "note": self._truncate(decision.daily_note.strip(), 500),
-                },
-            )
-        if decision.write_evergreen and decision.evergreen_note.strip():
-            self._append_evergreen_entry(
-                note=self._truncate(decision.evergreen_note.strip(), 320),
-                importance=max(self.importance_threshold, int(turns[-1].get("importance", 7))),
-                source="silent",
+            snapshot = self.build_context_block(
                 thread_id=thread_id,
+                max_items=self.max_facts,
+                recent_rounds=self.recent_rounds,
+                key_rounds=self.key_rounds,
+                query_hint=query_hint,
+                max_chars=context_max_chars * 2,
             )
+            if len(snapshot) < context_soft_limit_chars:
+                return
+
+            decision = self._silent_turn_decision(
+                llm=llm,
+                summary=memory.get("global_summary", ""),
+                context_snapshot=snapshot,
+                latest_turn=turns[-1],
+            )
+            if decision.compressed_summary.strip():
+                memory["global_summary"] = decision.compressed_summary.strip()[:1800]
+            memory["last_silent_turn_id"] = latest_turn_id
+            self.save(thread_id, memory)
+
+            if decision.write_daily and decision.daily_note.strip():
+                self._append_daily_record(
+                    day=_today_str(),
+                    record=self._build_daily_record(
+                        thread_id=thread_id,
+                        source="silent_maintenance",
+                        importance=max(self.importance_threshold, int(turns[-1].get("importance", 7))),
+                        decision=DailyLogRecordDecision(
+                            should_write=True,
+                            summary=decision.daily_note.strip(),
+                            category="memory_maintenance",
+                            confidence=0.8,
+                            tags=["silent-turn", "compaction"],
+                        ),
+                        ts=_utc_now(),
+                        turn_id=latest_turn_id,
+                    ),
+                )
+            if decision.write_evergreen and decision.evergreen_note.strip():
+                self._append_evergreen_entry(
+                    note=self._truncate(decision.evergreen_note.strip(), 320),
+                    importance=max(self.importance_threshold, int(turns[-1].get("importance", 7))),
+                    source="silent",
+                    thread_id=thread_id,
+                )
 
     def build_context_block(
         self,
@@ -471,19 +505,21 @@ class ConversationMemoryManager:
             if age_days > self.daily_lookback_days:
                 continue
             raw = json.loads(file_path.read_text(encoding="utf-8"))
-            entries = raw.get("entries", [])
-            for entry in entries:
-                note = str(entry.get("note", "")).strip()
-                if not note:
+            records = self._load_daily_records(raw)
+            for record in records:
+                summary = str(record.get("summary", "")).strip()
+                search_text = self._daily_record_search_text(record)
+                if not summary and not search_text:
                     continue
-                importance = int(entry.get("importance", 5))
-                relevance = self._query_relevance(note, query_hint)
+                importance = int(record.get("importance", 5))
+                relevance = self._query_relevance(search_text, query_hint)
                 decay = self._time_decay(age_days)
                 score = (importance / 10.0) * decay + 0.35 * relevance
                 candidates.append(
                     {
                         "day": file_path.stem,
-                        "note": note,
+                        "record": record,
+                        "summary": summary,
                         "score": score,
                         "age_days": age_days,
                         "importance": importance,
@@ -494,68 +530,283 @@ class ConversationMemoryManager:
             return ""
         lines = []
         for item in ranked:
+            record = item["record"]
+            detail = self._render_daily_record_compact(record)
             lines.append(
                 f"- {item['day']} age={item['age_days']}d score={item['score']:.3f}: "
-                f"{self._truncate(item['note'], 260)}"
+                f"{self._truncate(detail, 320)}"
             )
         return "\n".join(lines)
 
     def _retrieve_evergreen_block(self, *, query_hint: str, max_items: int) -> str:
-        raw = json.loads(self.evergreen_path.read_text(encoding="utf-8"))
-        entries = raw.get("entries", [])
+        raw = self._load_evergreen()
+        entries = []
+        for module_name, module in raw.get("modules", {}).items():
+            for entry in module.get("entries", []):
+                item = dict(entry)
+                item["module"] = module_name
+                entries.append(item)
         candidates = []
         for entry in entries:
             note = str(entry.get("note", "")).strip()
             if not note:
                 continue
             importance = int(entry.get("importance", 7))
-            relevance = self._query_relevance(note, query_hint)
+            relevance = self._query_relevance(self._evergreen_entry_search_text(entry), query_hint)
             score = (importance / 10.0) + 0.35 * relevance
-            candidates.append({"note": note, "score": score, "importance": importance})
+            candidates.append({"entry": entry, "score": score, "importance": importance})
         ranked = sorted(candidates, key=lambda item: item["score"], reverse=True)[:max_items]
         if not ranked:
             return ""
         return "\n".join(
-            f"- score={item['score']:.3f}: {self._truncate(item['note'], 220)}"
+            f"- {item['entry'].get('module', EVERGREEN_USER_MODULE)} score={item['score']:.3f}: "
+            f"{self._truncate(self._render_evergreen_entry(item['entry']), 260)}"
             for item in ranked
         )
 
-    def _append_daily_entry(self, *, day: str, entry: dict[str, Any]) -> None:
+    def _append_daily_record(self, *, day: str, record: dict[str, Any]) -> None:
         path = self.daily_root / f"{day}.json"
         if path.exists():
             raw = json.loads(path.read_text(encoding="utf-8"))
         else:
-            raw = {"date": day, "entries": [], "updated_at": _utc_now()}
-        entries = raw.get("entries", [])
-        entries.append(entry)
-        raw["entries"] = entries[-600:]
+            raw = {
+                "schema_version": DAILY_LOG_SCHEMA_VERSION,
+                "date": day,
+                "records": [],
+                "updated_at": _utc_now(),
+            }
+        records = self._load_daily_records(raw)
+        records.append(record)
+        raw = {
+            "schema_version": DAILY_LOG_SCHEMA_VERSION,
+            "date": day,
+            "records": records[-600:],
+            "updated_at": _utc_now(),
+        }
         raw["updated_at"] = _utc_now()
-        path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._write_json_atomic(path, raw)
 
-    def _append_evergreen_entry(self, *, note: str, importance: int, source: str, thread_id: str) -> None:
-        raw = json.loads(self.evergreen_path.read_text(encoding="utf-8"))
-        entries = raw.get("entries", [])
+    def _load_daily_records(self, raw: dict[str, Any]) -> list[dict[str, Any]]:
+        return [self._normalize_daily_record(item) for item in raw.get("records", []) if isinstance(item, dict)]
+
+    def _normalize_daily_record(self, record: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(record)
+        normalized.setdefault("schema_version", DAILY_LOG_SCHEMA_VERSION)
+        normalized.setdefault("id", uuid.uuid4().hex)
+        normalized.setdefault("ts", _utc_now())
+        normalized.setdefault("updated_at", normalized["ts"])
+        normalized.setdefault("source", "dialogue_turn")
+        normalized.setdefault("thread_id", "default")
+        normalized.setdefault("importance", 5)
+        normalized.setdefault("category", "conversation")
+        normalized.setdefault("confidence", 0.7)
+        normalized.setdefault("summary", "")
+        normalized.setdefault("facts", [])
+        normalized.setdefault("decisions", [])
+        normalized.setdefault("tasks", [])
+        normalized.setdefault("user_preferences", [])
+        normalized.setdefault("constraints", [])
+        normalized.setdefault("artifacts", [])
+        normalized.setdefault("next_actions", [])
+        normalized.setdefault("tags", [])
+        normalized.setdefault("raw", {})
+        return normalized
+
+    def _build_daily_record(
+        self,
+        *,
+        thread_id: str,
+        source: str,
+        importance: int,
+        decision: DailyLogRecordDecision,
+        ts: str,
+        turn_id: int | None = None,
+        raw_user: str = "",
+        raw_assistant: str = "",
+    ) -> dict[str, Any]:
+        now = _utc_now()
+        tags = [self._truncate(item, 40) for item in decision.tags if item.strip()][:8]
+        facts = [
+            {
+                "text": self._truncate(item.strip(), 180),
+                "confidence": round(float(decision.confidence), 2),
+                "tags": tags,
+            }
+            for item in decision.facts
+            if item.strip()
+        ][:8]
+        return {
+            "schema_version": DAILY_LOG_SCHEMA_VERSION,
+            "id": uuid.uuid4().hex,
+            "ts": ts,
+            "updated_at": now,
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "source": source,
+            "category": self._normalize_category(decision.category),
+            "importance": max(1, min(int(importance), 10)),
+            "confidence": round(max(0.0, min(float(decision.confidence), 1.0)), 2),
+            "summary": self._truncate(decision.summary.strip(), 500),
+            "facts": facts,
+            "decisions": [self._truncate(item.strip(), 180) for item in decision.decisions if item.strip()][:6],
+            "tasks": [self._truncate(item.strip(), 180) for item in decision.tasks if item.strip()][:6],
+            "user_preferences": [
+                self._truncate(item.strip(), 180) for item in decision.user_preferences if item.strip()
+            ][:6],
+            "constraints": [self._truncate(item.strip(), 180) for item in decision.constraints if item.strip()][:6],
+            "artifacts": [self._truncate(item.strip(), 180) for item in decision.artifacts if item.strip()][:8],
+            "next_actions": [self._truncate(item.strip(), 180) for item in decision.next_actions if item.strip()][:6],
+            "tags": tags,
+            "raw": {
+                "user": self._truncate(raw_user, 700),
+                "assistant": self._truncate(raw_assistant, 700),
+            },
+        }
+
+    def _normalize_category(self, category: str) -> str:
+        normalized = re.sub(r"[^a-zA-Z0-9_-]+", "_", category.strip().lower()).strip("_")
+        return normalized or "conversation"
+
+    def _daily_record_search_text(self, record: dict[str, Any]) -> str:
+        parts = [
+            record.get("summary", ""),
+            " ".join(str(item.get("text", "")) for item in record.get("facts", []) if isinstance(item, dict)),
+            " ".join(record.get("decisions", [])),
+            " ".join(record.get("tasks", [])),
+            " ".join(record.get("user_preferences", [])),
+            " ".join(record.get("constraints", [])),
+            " ".join(record.get("artifacts", [])),
+            " ".join(record.get("next_actions", [])),
+            " ".join(record.get("tags", [])),
+        ]
+        return " ".join(str(item) for item in parts if item).strip()
+
+    def _render_daily_record_compact(self, record: dict[str, Any]) -> str:
+        facts = [item.get("text", "") for item in record.get("facts", []) if isinstance(item, dict)]
+        parts = [
+            f"{record.get('category', 'conversation')}[{record.get('source', 'unknown')}]",
+            str(record.get("summary", "")).strip(),
+        ]
+        if facts:
+            parts.append("facts=" + "; ".join(facts[:3]))
+        if record.get("tasks"):
+            parts.append("tasks=" + "; ".join(record["tasks"][:3]))
+        if record.get("decisions"):
+            parts.append("decisions=" + "; ".join(record["decisions"][:3]))
+        return " | ".join(item for item in parts if item)
+
+    def _append_evergreen_entry(
+        self,
+        *,
+        note: str,
+        importance: int,
+        source: str,
+        thread_id: str,
+        module: str = EVERGREEN_USER_MODULE,
+        confidence: float = 0.75,
+        tags: list[str] | None = None,
+        trigger: str = "",
+        recommendation: str = "",
+    ) -> None:
+        raw = self._load_evergreen()
+        module = module if module in {EVERGREEN_USER_MODULE, EVERGREEN_REFLECTION_MODULE} else EVERGREEN_USER_MODULE
+        entries = raw["modules"][module].setdefault("entries", [])
         normalized = self._normalize_text(note)
         for item in entries:
             if self._normalize_text(str(item.get("note", ""))) == normalized:
                 item["importance"] = max(int(item.get("importance", 6)), importance)
+                item["confidence"] = max(float(item.get("confidence", 0.0)), confidence)
                 item["updated_at"] = _utc_now()
+                if recommendation:
+                    item["recommendation"] = recommendation
+                if trigger:
+                    item["trigger"] = trigger
+                item["tags"] = sorted(set(item.get("tags", []) + (tags or [])))[:12]
                 raw["updated_at"] = _utc_now()
-                self.evergreen_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+                self._save_evergreen(raw)
                 return
         entries.append(
             {
+                "id": uuid.uuid4().hex,
                 "ts": _utc_now(),
                 "updated_at": _utc_now(),
                 "thread_id": thread_id,
                 "source": source,
                 "importance": importance,
+                "confidence": round(max(0.0, min(confidence, 1.0)), 2),
                 "note": note,
+                "trigger": trigger,
+                "recommendation": recommendation,
+                "tags": tags or [],
             }
         )
-        raw["entries"] = entries[-300:]
+        raw["modules"][module]["entries"] = entries[-300:]
         raw["updated_at"] = _utc_now()
-        self.evergreen_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._save_evergreen(raw)
+
+    def _empty_evergreen(self) -> dict[str, Any]:
+        now = _utc_now()
+        return {
+            "schema_version": EVERGREEN_SCHEMA_VERSION,
+            "updated_at": now,
+            "modules": {
+                EVERGREEN_USER_MODULE: {
+                    "description": "Durable user-side facts, preferences, constraints, and goals.",
+                    "entries": [],
+                },
+                EVERGREEN_REFLECTION_MODULE: {
+                    "description": "Agent reflexion lessons about strategies, failure modes, and reusable tactics.",
+                    "entries": [],
+                },
+            },
+        }
+
+    def _load_evergreen(self) -> dict[str, Any]:
+        if not self.evergreen_path.exists():
+            return self._empty_evergreen()
+        raw = json.loads(self.evergreen_path.read_text(encoding="utf-8"))
+        if not isinstance(raw.get("modules"), dict):
+            return self._empty_evergreen()
+        for module_name in (EVERGREEN_USER_MODULE, EVERGREEN_REFLECTION_MODULE):
+            raw["modules"].setdefault(module_name, self._empty_evergreen()["modules"][module_name])
+        raw.setdefault("schema_version", EVERGREEN_SCHEMA_VERSION)
+        raw.setdefault("updated_at", _utc_now())
+        return raw
+
+    def _save_evergreen(self, raw: dict[str, Any]) -> None:
+        raw["schema_version"] = EVERGREEN_SCHEMA_VERSION
+        raw["updated_at"] = _utc_now()
+        self._write_json_atomic(self.evergreen_path, raw)
+
+    def _evergreen_entry_search_text(self, entry: dict[str, Any]) -> str:
+        return " ".join(
+            str(item)
+            for item in [
+                entry.get("note", ""),
+                entry.get("trigger", ""),
+                entry.get("recommendation", ""),
+                " ".join(entry.get("tags", [])),
+                entry.get("module", ""),
+            ]
+            if item
+        )
+
+    def _render_evergreen_entry(self, entry: dict[str, Any]) -> str:
+        parts = [str(entry.get("note", "")).strip()]
+        if entry.get("recommendation"):
+            parts.append("recommendation=" + str(entry["recommendation"]).strip())
+        if entry.get("tags"):
+            parts.append("tags=" + ",".join(entry["tags"][:6]))
+        return " | ".join(item for item in parts if item)
+
+    def _write_json_atomic(self, path: Path, payload: dict) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+        tmp_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        tmp_path.replace(path)
 
     def _extract_evergreen_note(self, user: str, assistant: str) -> str:
         text = user.strip()
@@ -570,51 +821,171 @@ class ConversationMemoryManager:
             return ""
         return self._truncate(text, 260)
 
-    def _extract_daily_log_note(
+    def reflect_on_turn(
+        self,
+        *,
+        thread_id: str,
+        user: str,
+        assistant: str,
+        tool_observations: list[str],
+        llm,
+    ) -> None:
+        if not user.strip() and not assistant.strip():
+            return
+        decision = self._build_reflection_decision(
+            user=user,
+            assistant=assistant,
+            tool_observations=tool_observations,
+            llm=llm,
+        )
+        if decision is None or not decision.should_write or not decision.lesson.strip():
+            return
+        if decision.confidence < 0.65:
+            return
+        with self._lock:
+            self._append_evergreen_entry(
+                note=self._truncate(decision.lesson.strip(), 320),
+                importance=8 if decision.confidence >= 0.8 else 7,
+                source="reflexion",
+                thread_id=thread_id,
+                module=EVERGREEN_REFLECTION_MODULE,
+                confidence=decision.confidence,
+                tags=[self._truncate(item.strip(), 40) for item in decision.tags if item.strip()][:8],
+                trigger=self._truncate(decision.trigger.strip(), 240),
+                recommendation=self._truncate(decision.recommendation.strip(), 260),
+            )
+
+    def _build_reflection_decision(
+        self,
+        *,
+        user: str,
+        assistant: str,
+        tool_observations: list[str],
+        llm,
+    ) -> ReflectionDecision | None:
+        prompt = (
+            "You are Falco's reflexion module. Extract one reusable operational lesson from the latest turn.\n"
+            "Write only if the lesson will improve future agent behavior, tool choice, validation, planning, "
+            "or error recovery. Do not store user private facts here; those belong to user memory.\n"
+            "Return JSON: should_write, lesson, trigger, recommendation, confidence, tags.\n"
+            "Keep lesson and recommendation concise."
+        )
+        observations = "\n".join(f"- {self._truncate(item, 500)}" for item in tool_observations[:8])
+        payload = (
+            f"User:\n{self._truncate(user, 1200)}\n\n"
+            f"Assistant:\n{self._truncate(assistant, 1200)}\n\n"
+            f"Tool observations:\n{observations or '(none)'}"
+        )
+        try:
+            reflector = llm.with_structured_output(ReflectionDecision)
+            result = reflector.invoke(
+                [
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": payload},
+                ]
+            )
+            result.lesson = self._truncate(result.lesson.strip(), 320)
+            result.trigger = self._truncate(result.trigger.strip(), 240)
+            result.recommendation = self._truncate(result.recommendation.strip(), 260)
+            result.tags = [self._truncate(item.strip(), 40) for item in result.tags if item.strip()][:8]
+            return result
+        except Exception:
+            return self._heuristic_reflection(user=user, assistant=assistant, tool_observations=tool_observations)
+
+    def _heuristic_reflection(
+        self,
+        *,
+        user: str,
+        assistant: str,
+        tool_observations: list[str],
+    ) -> ReflectionDecision | None:
+        joined = "\n".join([user, assistant, *tool_observations]).lower()
+        if not re.search(r"\b(error|failed|refusing|not found|traceback|exception|path escapes|tool execution failed)\b", joined):
+            return None
+        return ReflectionDecision(
+            should_write=True,
+            lesson="When tool output indicates failure, inspect the exact observation and adjust the next action instead of repeating the same call.",
+            trigger=self._truncate(" | ".join(tool_observations[:2]), 240),
+            recommendation="Summarize the failure, choose a smaller verification step, then retry with corrected inputs.",
+            confidence=0.7,
+            tags=["tool-use", "error-recovery"],
+        )
+
+    def _extract_daily_log_record(
         self,
         *,
         user: str,
         assistant: str,
         importance: int,
         llm=None,
-    ) -> dict[str, Any] | None:
+    ) -> DailyLogRecordDecision | None:
         if llm is not None:
             prompt = (
-                "Decide whether this turn should be written into a daily memory log.\n"
-                "Write only if it has valuable/important information or extractable facts.\n"
-                "Return JSON with: should_write, note, facts.\n"
-                "facts should be concise atomic facts."
+                "Decide whether this dialogue turn should be written into a structured daily memory log.\n"
+                "Extract durable, useful records instead of copying the chat.\n"
+                "Write only if it contains future-useful facts, decisions, tasks, preferences, constraints, "
+                "artifacts, or next actions.\n"
+                "Return JSON with fields: should_write, summary, category, confidence, facts, decisions, "
+                "tasks, user_preferences, constraints, artifacts, next_actions, tags.\n"
+                "Keep every list item concise and atomic."
             )
             payload = (
                 f"Importance: {importance}\n"
-                f"User: {user}\n"
-                f"Assistant: {assistant}"
+                f"User:\n{user}\n\n"
+                f"Assistant:\n{assistant}"
             )
             try:
-                extractor = llm.with_structured_output(DailyLogDecision)
+                extractor = llm.with_structured_output(DailyLogRecordDecision)
                 decision = extractor.invoke(
                     [
                         {"role": "system", "content": prompt},
                         {"role": "user", "content": payload},
                     ]
                 )
-                facts = [self._truncate(item.strip(), 160) for item in decision.facts if item.strip()][:6]
-                if decision.should_write and (decision.note.strip() or facts):
-                    return {
-                        "note": decision.note.strip() or "Valuable turn captured.",
-                        "facts": facts,
-                    }
+                decision.summary = self._truncate(decision.summary.strip(), 500)
+                decision.facts = [self._truncate(item.strip(), 180) for item in decision.facts if item.strip()][:8]
+                decision.decisions = [
+                    self._truncate(item.strip(), 180) for item in decision.decisions if item.strip()
+                ][:6]
+                decision.tasks = [self._truncate(item.strip(), 180) for item in decision.tasks if item.strip()][:6]
+                decision.user_preferences = [
+                    self._truncate(item.strip(), 180) for item in decision.user_preferences if item.strip()
+                ][:6]
+                decision.constraints = [
+                    self._truncate(item.strip(), 180) for item in decision.constraints if item.strip()
+                ][:6]
+                decision.artifacts = [
+                    self._truncate(item.strip(), 180) for item in decision.artifacts if item.strip()
+                ][:8]
+                decision.next_actions = [
+                    self._truncate(item.strip(), 180) for item in decision.next_actions if item.strip()
+                ][:6]
+                decision.tags = [self._truncate(item.strip(), 40) for item in decision.tags if item.strip()][:8]
+                if decision.should_write and self._daily_decision_has_content(decision):
+                    return decision
             except Exception:
                 pass
-        return self._extract_daily_log_note_heuristic(user=user, assistant=assistant, importance=importance)
+        return self._extract_daily_log_record_heuristic(user=user, assistant=assistant, importance=importance)
 
-    def _extract_daily_log_note_heuristic(
+    def _daily_decision_has_content(self, decision: DailyLogRecordDecision) -> bool:
+        return bool(
+            decision.summary.strip()
+            or decision.facts
+            or decision.decisions
+            or decision.tasks
+            or decision.user_preferences
+            or decision.constraints
+            or decision.artifacts
+            or decision.next_actions
+        )
+
+    def _extract_daily_log_record_heuristic(
         self,
         *,
         user: str,
         assistant: str,
         importance: int,
-    ) -> dict[str, Any] | None:
+    ) -> DailyLogRecordDecision | None:
         joined = f"{user}\n{assistant}".strip()
         if not joined:
             return None
@@ -628,8 +999,34 @@ class ConversationMemoryManager:
         if importance < self.importance_threshold and not has_fact_signal:
             return None
         facts = self._heuristic_extract_facts(joined)
-        note = self._truncate(joined, 340)
-        return {"note": note, "facts": facts}
+        tasks = self._heuristic_extract_by_signal(
+            joined,
+            r"\b(todo|task|next step|deadline|due|follow up|implement|fix|deploy|test)\b",
+        )
+        constraints = self._heuristic_extract_by_signal(
+            joined,
+            r"\b(must|never|always|constraint|requirement|do not|don't|avoid)\b",
+        )
+        preferences = self._heuristic_extract_by_signal(
+            joined,
+            r"\b(prefer|like|usually|style|habit)\b|希望|偏好|喜欢",
+        )
+        decisions = self._heuristic_extract_by_signal(
+            joined,
+            r"\b(decide|decision|agreed|chosen|final)\b|确定|决定",
+        )
+        return DailyLogRecordDecision(
+            should_write=True,
+            summary=self._truncate(joined, 340),
+            category=self._infer_daily_category(joined, tasks=tasks, preferences=preferences, constraints=constraints),
+            confidence=0.55 if not facts else 0.65,
+            facts=facts,
+            decisions=decisions,
+            tasks=tasks,
+            user_preferences=preferences,
+            constraints=constraints,
+            tags=self._infer_daily_tags(joined),
+        )
 
     def _heuristic_extract_facts(self, text: str) -> list[str]:
         lines = re.split(r"[。！？\n]|(?<=[.!?])\s+", text)
@@ -647,6 +1044,54 @@ class ConversationMemoryManager:
             if len(facts) >= 6:
                 break
         return facts
+
+    def _heuristic_extract_by_signal(self, text: str, pattern: str, limit: int = 4) -> list[str]:
+        lines = re.split(r"[\n。；;]|(?<=[.!?])\s+", text)
+        items: list[str] = []
+        for line in lines:
+            piece = line.strip()
+            if len(piece) < 6:
+                continue
+            if re.search(pattern, piece, re.IGNORECASE):
+                items.append(self._truncate(piece, 180))
+            if len(items) >= limit:
+                break
+        return items
+
+    def _infer_daily_category(
+        self,
+        text: str,
+        *,
+        tasks: list[str],
+        preferences: list[str],
+        constraints: list[str],
+    ) -> str:
+        low = text.lower()
+        if preferences:
+            return "user_preference"
+        if constraints:
+            return "constraint"
+        if tasks or re.search(r"\b(todo|task|deadline|due|implement|fix|deploy|test)\b", low):
+            return "task"
+        if re.search(r"\b(decision|decide|agreed|final)\b", low):
+            return "decision"
+        if re.search(r"\b(error|bug|failed|incident|regression)\b", low):
+            return "issue"
+        return "conversation"
+
+    def _infer_daily_tags(self, text: str) -> list[str]:
+        tags: list[str] = []
+        signals = [
+            ("task", r"\b(todo|task|deadline|due|implement|fix)\b"),
+            ("preference", r"\b(prefer|like|usually|style|habit)\b|偏好|喜欢"),
+            ("constraint", r"\b(must|never|always|constraint|requirement)\b"),
+            ("bug", r"\b(error|bug|failed|incident|regression)\b"),
+            ("architecture", r"\b(api|schema|architecture|database|agent|memory|rag)\b"),
+        ]
+        for tag, pattern in signals:
+            if re.search(pattern, text, re.IGNORECASE):
+                tags.append(tag)
+        return tags[:6]
 
     def _query_relevance(self, text: str, query_hint: str) -> float:
         query_tokens = self._tokenize(query_hint)
