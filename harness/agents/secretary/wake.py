@@ -11,8 +11,9 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from config import FalcoSettings
-from memory import ConversationMemoryManager
-from rag import MilvusRAG
+from harness.agents.memory.manager import ConversationMemoryManager
+from harness.agents.secretary.mind import SYSTEM_PROMPT_TEMPLATE
+from harness.rag import MilvusRAG
 from skills import SkillManager
 from state import FalcoState
 from subagent import SubAgentRunner
@@ -83,6 +84,11 @@ class FalcoOrchestrator:
         def hydrate_context(state: FalcoState) -> FalcoState:
             tid = state.get("thread_id") or self._thread_id_ctx.get()
             self._thread_id_ctx.set(tid)
+            latest_user_text = ""
+            for message in reversed(state.get("messages", [])):
+                if isinstance(message, HumanMessage):
+                    latest_user_text = str(message.content or "")
+                    break
             return {
                 "thread_id": tid,
                 "context_block": self.memory.build_context_block(
@@ -90,13 +96,15 @@ class FalcoOrchestrator:
                     max_items=self.settings.max_context_messages,
                     recent_rounds=self.settings.memory_recent_rounds,
                     key_rounds=self.settings.memory_key_rounds,
+                    query_hint=latest_user_text,
+                    max_chars=self.settings.memory_context_max_chars,
                 ),
                 "skills_block": self.skills.get_prompt_block(),
             }
 
         def lead_agent(state: FalcoState) -> FalcoState:
-            context_block = state.get("context_block", "").strip() or "No prior memory context."
-            skills_block = state.get("skills_block", "").strip() or "No active skills."
+            context_block = state.get("context_block", "").strip()
+            skills_block = state.get("skills_block", "").strip()
             dynamic_prompt = (
                 f"{LEAD_SYSTEM_PROMPT}\n\n"
                 f"Memory context:\n{context_block}\n\n"
@@ -129,6 +137,14 @@ class FalcoOrchestrator:
                 user=latest_user,
                 assistant=latest_ai,
                 llm=self.llm,
+            )
+            self.memory.maybe_run_silent_turn_compaction(
+                thread_id=tid,
+                llm=self.llm,
+                context_soft_limit_chars=self.settings.memory_context_soft_limit_chars,
+                context_max_chars=self.settings.memory_context_max_chars,
+                silent_turn_cooldown_rounds=self.settings.memory_silent_turn_cooldown_rounds,
+                query_hint=latest_user,
             )
             return {}
 
