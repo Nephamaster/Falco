@@ -37,8 +37,8 @@ class FalcoSettings:
     memory_key_rounds: int = 4
     memory_importance_threshold: int = 7
     memory_max_rounds: int = 160
-    memory_context_soft_limit_chars: int = 7000
-    memory_context_max_chars: int = 9000
+    memory_context_soft_limit_tokens: int = 7000
+    memory_context_max_tokens: int = 9000
     memory_silent_turn_cooldown_rounds: int = 4
     memory_daily_half_life_days: int = 30
     memory_daily_lookback_days: int = 180
@@ -74,8 +74,12 @@ class FalcoSettings:
             memory_key_rounds=int(os.getenv("FALCO_MEMORY_KEY_ROUNDS", "4")),
             memory_importance_threshold=int(os.getenv("FALCO_MEMORY_IMPORTANCE_THRESHOLD", "7")),
             memory_max_rounds=int(os.getenv("FALCO_MEMORY_MAX_ROUNDS", "160")),
-            memory_context_soft_limit_chars=int(os.getenv("FALCO_MEMORY_CONTEXT_SOFT_LIMIT_CHARS", "7000")),
-            memory_context_max_chars=int(os.getenv("FALCO_MEMORY_CONTEXT_MAX_CHARS", "9000")),
+            memory_context_soft_limit_tokens=int(
+                os.getenv("FALCO_MEMORY_CONTEXT_SOFT_LIMIT_TOKENS", "7000")
+            ),
+            memory_context_max_tokens=int(
+                os.getenv("FALCO_MEMORY_CONTEXT_MAX_TOKENS", "9000")
+            ),
             memory_silent_turn_cooldown_rounds=int(
                 os.getenv("FALCO_MEMORY_SILENT_TURN_COOLDOWN_ROUNDS", "4")
             ),

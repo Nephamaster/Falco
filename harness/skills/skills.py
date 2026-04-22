@@ -4,6 +4,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from harness.tokenization import truncate_tokens
+
 
 @dataclass(frozen=True)
 class Skill:
@@ -121,13 +123,13 @@ class SkillManager:
             skills = [skill for skill in skills if skill.enabled]
         return skills
 
-    def get_prompt_block(self, max_chars: int = 5000) -> str:
+    def get_prompt_block(self, max_tokens: int = 5000) -> str:
         blocks: list[str] = []
         for skill in self.list_skills(enabled_only=True):
             entry = f"[Skill: {skill.name}]\n{skill.content}".strip()
             blocks.append(entry)
         merged = "\n\n".join(blocks)
-        return merged[:max_chars]
+        return truncate_tokens(merged, max_tokens)
 
     def create_or_update(self, name: str, description: str, content: str, enabled: bool = True) -> Skill:
         skill_name = _slugify(name)

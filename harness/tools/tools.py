@@ -11,6 +11,7 @@ from harness.agents.memory.manager import ConversationMemoryManager
 from harness.agents.subagent import SubAgentRunner
 from harness.rag import MilvusRAG
 from harness.skills.skills import SkillManager
+from harness.tokenization import count_tokens, truncate_tokens
 
 try:
     from dotenv import load_dotenv
@@ -21,8 +22,8 @@ except ModuleNotFoundError:
 
 load_dotenv()
 
-MAX_TOOL_READ_CHARS = 100_000
-MAX_TOOL_WRITE_CHARS = 200_000
+MAX_TOOL_READ_TOKENS = 100_000
+MAX_TOOL_WRITE_TOKENS = 200_000
 MAX_SEARCH_FILE_BYTES = 1_000_000
 MAX_SEARCH_FILES = 800
 MAX_LIST_ITEMS = 300
@@ -143,11 +144,12 @@ def create_core_tools(
     def _execute_write_file(path: str, content: str) -> str:
         target = _resolve_path(workspace_root, path)
         _ensure_tool_path_allowed(target, workspace_root, write=True)
-        if len(content) > MAX_TOOL_WRITE_CHARS:
-            return f"Refusing to write more than {MAX_TOOL_WRITE_CHARS} chars in one tool call."
+        content_tokens = count_tokens(content)
+        if content_tokens > MAX_TOOL_WRITE_TOKENS:
+            return f"Refusing to write more than {MAX_TOOL_WRITE_TOKENS} tokens in one tool call."
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
-        return f"Wrote {len(content)} chars to {target.relative_to(workspace_root)}"
+        return f"Wrote {content_tokens} tokens to {target.relative_to(workspace_root)}"
 
     def _execute_skill_manage(
         *,
@@ -236,23 +238,25 @@ def create_core_tools(
         return "\n".join(rows) if rows else "(empty)"
 
     @tool
-    def read_file(path: str, max_chars: int = 6000) -> str:
+    def read_file(path: str, max_tokens: int = 6000) -> str:
         """Read a text file from workspace. Use workspace-relative path."""
         target = _resolve_path(workspace_root, path)
         _ensure_tool_path_allowed(target, workspace_root)
         if not target.exists() or not target.is_file():
             return f"File not found: {path}"
-        limit = max(1, min(int(max_chars), MAX_TOOL_READ_CHARS))
+        limit = max(1, min(int(max_tokens), MAX_TOOL_READ_TOKENS))
         with target.open("r", encoding="utf-8") as handle:
-            return handle.read(limit)
+            content = handle.read()
+        return truncate_tokens(content, limit)
 
     @tool
     def write_file(path: str, content: str, approved_request_id: str = "") -> str:
         """Request approval to write a text file. Use approve_pending_action to execute after user approval."""
         target = _resolve_path(workspace_root, path)
         _ensure_tool_path_allowed(target, workspace_root, write=True)
-        if len(content) > MAX_TOOL_WRITE_CHARS:
-            return f"Refusing to write more than {MAX_TOOL_WRITE_CHARS} chars in one tool call."
+        content_tokens = count_tokens(content)
+        if content_tokens > MAX_TOOL_WRITE_TOKENS:
+            return f"Refusing to write more than {MAX_TOOL_WRITE_TOKENS} tokens in one tool call."
         if approved_request_id:
             if not _latest_user_approves(approved_request_id):
                 return (
@@ -272,9 +276,9 @@ def create_core_tools(
             thread_id=thread_id_getter(),
             action="write_file",
             payload={"path": path, "content": content},
-            rationale=f"Write {len(content)} chars to {path}.",
+            rationale=f"Write {content_tokens} tokens to {path}.",
         )
-        return _approval_required(item, preview=f"{path} ({len(content)} chars)")
+        return _approval_required(item, preview=f"{path} ({content_tokens} tokens)")
 
     @tool
     def search_in_files(pattern: str, path: str = ".") -> str:

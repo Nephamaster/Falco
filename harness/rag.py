@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from harness.config.config import FalcoSettings
 from harness.prompts.templates import RAG_QUERY_OPTIMIZATION_PROMPT_TEMPLATE
+from harness.tokenization import truncate_tokens
 
 
 ALLOWED_KNOWLEDGE_EXTENSIONS = {
@@ -66,7 +67,7 @@ class RAGSearchResult:
     query_plan: QueryPlan
     docs: list[Document]
 
-    def render(self, max_chars_per_doc: int = 700) -> str:
+    def render(self, max_tokens_per_doc: int = 700) -> str:
         if not self.docs:
             return "No knowledge found in local vector database."
         lines = [
@@ -80,7 +81,7 @@ class RAGSearchResult:
             chunk_id = doc.metadata.get("chunk_id", "n/a")
             text = doc.page_content.strip().replace("\n", " ")
             lines.append(f"[{idx}] source={source} chunk={chunk_id}")
-            lines.append(text[:max_chars_per_doc])
+            lines.append(truncate_tokens(text, max_tokens_per_doc))
             lines.append("")
         return "\n".join(lines).strip()
 
@@ -191,7 +192,10 @@ class MilvusRAG:
                 docs = []
 
             for doc in docs:
-                key = (str(doc.metadata.get("source", "")), doc.page_content[:120])
+                key = (
+                    str(doc.metadata.get("source", "")),
+                    truncate_tokens(doc.page_content, 120),
+                )
                 unique[key] = doc
 
         return list(unique.values())
@@ -201,7 +205,7 @@ class MilvusRAG:
             return []
         try:
             reranker = self._get_reranker()
-            pairs = [(query, doc.page_content[:2200]) for doc in docs]
+            pairs = [(query, truncate_tokens(doc.page_content, 2200)) for doc in docs]
             scores = reranker.predict(pairs)
             ranked = sorted(
                 zip(docs, scores, strict=False),

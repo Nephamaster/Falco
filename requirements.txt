@@ -7,6 +7,7 @@ langchain-milvus
 langchain-text-splitters
 pymilvus
 sentence-transformers
+tiktoken
 python-dotenv
 fastapi
 uvicorn[standard]

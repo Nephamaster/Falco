@@ -51,14 +51,21 @@ class FalcoOrchestrator:
     def __init__(self, settings: FalcoSettings | None = None) -> None:
         load_dotenv()
         self.settings = settings or FalcoSettings.from_env()
+
         self._thread_id_ctx: ContextVar[str] = ContextVar("falco_thread_id", default="default")
         self._latest_user_ctx: ContextVar[str] = ContextVar("falco_latest_user", default="")
+        
         self.memory = ConversationMemoryManager(
             self.settings.memory_root,
             recent_rounds=self.settings.memory_recent_rounds,
             key_rounds=self.settings.memory_key_rounds,
             importance_threshold=self.settings.memory_importance_threshold,
             max_rounds=self.settings.memory_max_rounds,
+            daily_half_life_days=self.settings.memory_daily_half_life_days,
+            daily_lookback_days=self.settings.memory_daily_lookback_days,
+            daily_retrieval_items=self.settings.memory_daily_retrieval_items,
+            evergreen_retrieval_items=self.settings.memory_evergreen_retrieval_items,
+            tokenizer_model=self.settings.model,
         )
         self.human_loop = HumanLoopManager(self.settings.workspace_root / ".falco" / "hitl")
         self.skills = SkillManager(self.settings.skills_root)
@@ -128,7 +135,7 @@ class FalcoOrchestrator:
                     recent_rounds=self.settings.memory_recent_rounds,
                     key_rounds=self.settings.memory_key_rounds,
                     query_hint=latest_user_text,
-                    max_chars=self.settings.memory_context_max_chars,
+                    max_tokens=self.settings.memory_context_max_tokens,
                 ),
                 "skills_block": self.skills.get_prompt_block(),
             }
@@ -159,6 +166,11 @@ class FalcoOrchestrator:
             latest_user = ""
             latest_ai = ""
             tool_observations: list[str] = []
+            runtime_context_tokens = 0
+            for message in state.get("messages", []):
+                content = str(getattr(message, "content", "") or "")
+                runtime_context_tokens += self.memory._count_tokens(content)
+            runtime_context_tokens += self.memory._count_tokens(state.get("context_block", ""))
             for message in reversed(state["messages"]):
                 if isinstance(message, ToolMessage) and len(tool_observations) < self.settings.max_tool_steps:
                     tool_observations.append(str(message.content or ""))
@@ -177,10 +189,11 @@ class FalcoOrchestrator:
             self.memory.maybe_run_silent_turn_compaction(
                 thread_id=tid,
                 llm=self.llm,
-                context_soft_limit_chars=self.settings.memory_context_soft_limit_chars,
-                context_max_chars=self.settings.memory_context_max_chars,
+                context_soft_limit_tokens=self.settings.memory_context_soft_limit_tokens,
+                context_max_tokens=self.settings.memory_context_max_tokens,
                 silent_turn_cooldown_rounds=self.settings.memory_silent_turn_cooldown_rounds,
                 query_hint=latest_user,
+                runtime_context_tokens=runtime_context_tokens,
             )
             self.memory.reflect_on_turn(
                 thread_id=tid,
