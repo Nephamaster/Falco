@@ -51,7 +51,7 @@ class MemoryInferenceMixin:
             (r"\b(decision|decide|agreed|final)\b", 2),
             (r"\b(bug|error|failed|incident|regression)\b", 2),
             (r"\b(api|schema|architecture|database|deploy)\b", 1),
-            (r"(é æ»„î‚½|é‹å¿“ã‚½|æ¶”çŠ³å„»|éç£‹å®|æ¶“å¶…æž©å¨†î•¢è¹‡å‘´ã€|ç»¾ï¸½æ½«|é©î†½çˆ£|éå†²ç•¾|ç’â€³åž|é–¿æ¬’î‡¤|éå‘´æ®°)", 2),
+            (r"(偏好|喜欢|不喜欢|习惯|要求|必须|约束|决定|结论|截止|里程碑|任务|错误|故障|回归|接口|架构|数据库|部署)", 2),
         ]
         for pattern, delta in boosts:
             if re.search(pattern, text):
@@ -140,7 +140,7 @@ class MemoryInferenceMixin:
         if not text:
             return ""
         indicator = re.search(
-            r"(é æ»„î‚½|é‹å¿“ã‚½|æ¶”çŠ³å„»|éç£‹å®|æ¶“å¶…æž©å¨†î•¢é–«æ°¬çˆ¶|éŽ¬ç»˜æ§¸|éŽ´æˆœç´°|éŽ´æˆœç«´é‘¸ç‘‹I like|I prefer|I usually|I don't like)",
+            r"(喜欢|偏好|习惯|不喜欢|我一般|我通常|长期|风格|I like|I prefer|I usually|I don't like)",
             text,
             re.IGNORECASE,
         )
@@ -297,7 +297,7 @@ class MemoryInferenceMixin:
             return None
         has_fact_signal = bool(
             re.search(
-                r"(é„ç˜„é¦â–…é–å‘­æƒˆ|é—å Ÿæ¹°|éƒå •æ£¿|éƒãƒ¦æ¹¡|é¦æ¿æ½ƒ|é¢ä½ƒç˜½|é–­î†¾î†ˆ|deadline|due|version|date|must|constraint|prefer)",
+                r"(事实|结论|决定|任务|版本|日期|截止|约束|必须|偏好|要求|deadline|due|version|date|must|constraint|prefer)",
                 joined,
                 re.IGNORECASE,
             )
@@ -315,11 +315,11 @@ class MemoryInferenceMixin:
         )
         preferences = self._heuristic_extract_by_signal(
             joined,
-            r"\b(prefer|like|usually|style|habit)\b|ç”¯å±¾æ¹œ|é‹å¿“ã‚½|é æ»„î‚½",
+            r"\b(prefer|like|usually|style|habit)\b|偏好|喜欢|习惯|风格",
         )
         decisions = self._heuristic_extract_by_signal(
             joined,
-            r"\b(decide|decision|agreed|chosen|final)\b|çº­î†¼ç•¾|éå†²ç•¾",
+            r"\b(decide|decision|agreed|chosen|final)\b|决定|结论|已确认",
         )
         return DailyLogRecordDecision(
             should_write=True,
@@ -335,14 +335,14 @@ class MemoryInferenceMixin:
         )
 
     def _heuristic_extract_facts(self, text: str) -> list[str]:
-        lines = re.split(r"[éŠ†å‚¦ç´’é”›ç„…n]|(?<=[.!?])\s+", text)
+        lines = re.split(r"[\n,;，；。]|(?<=[.!?])\s+", text)
         facts: list[str] = []
         for line in lines:
             piece = line.strip()
             if len(piece) < 6:
                 continue
             if re.search(
-                r"(é„ç˜„é¦â–…é–å‘­æƒˆ|é—‡â‚¬ç‘•äº…è¹‡å‘´ã€|é‹å¿“ã‚½|æ¶”çŠ³å„»|éç£‹å®|é—å Ÿæ¹°|éƒãƒ¦æ¹¡|éƒå •æ£¿|é¦æ¿æ½ƒ|deadline|version|date|must|prefer|usually)",
+                r"(事实|关键信息|偏好|习惯|要求|任务|版本|日期|截止|deadline|version|date|must|prefer|usually)",
                 piece,
                 re.IGNORECASE,
             ):
@@ -352,7 +352,7 @@ class MemoryInferenceMixin:
         return facts
 
     def _heuristic_extract_by_signal(self, text: str, pattern: str, limit: int = 4) -> list[str]:
-        lines = re.split(r"[\néŠ†å‚¦ç´±;]|(?<=[.!?])\s+", text)
+        lines = re.split(r"[\n,;，；。]|(?<=[.!?])\s+", text)
         items: list[str] = []
         for line in lines:
             piece = line.strip()
@@ -389,7 +389,7 @@ class MemoryInferenceMixin:
         tags: list[str] = []
         signals = [
             ("task", r"\b(todo|task|deadline|due|implement|fix)\b"),
-            ("preference", r"\b(prefer|like|usually|style|habit)\b|é‹å¿“ã‚½|é æ»„î‚½"),
+            ("preference", r"\b(prefer|like|usually|style|habit)\b|偏好|喜欢|习惯"),
             ("constraint", r"\b(must|never|always|constraint|requirement)\b"),
             ("bug", r"\b(error|bug|failed|incident|regression)\b"),
             ("architecture", r"\b(api|schema|architecture|database|agent|memory|rag)\b"),
