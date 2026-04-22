@@ -225,20 +225,36 @@ If yes, extract only reusable structured information.
 If not, return an empty record following the schema."""
 
 
-EVERGREEN_DECISION_PROMPT = """Decide whether this dialogue turn contains durable user-profile information worth writing to Evergreen Diary.
+EVERGREEN_DECISION_PROMPT = """You are deciding whether the current dialogue turn contains information that should be written into the Evergreen Diary.
 
-Evergreen is for long-term stable memory only:
-- persistent preferences, habits, interests
+The Evergreen Diary is long-term semantic memory about the user.
+It stores only stable user-profile information that is likely to remain useful across future conversations.
+
+Write only for information such as:
+- persistent preferences
+- recurring habits
+- stable interests
 - long-term goals
-- stable constraints
+- enduring constraints
+- lasting communication or working style preferences
 
 Do NOT write:
 - temporary requests
-- transient task status
+- short-term tasks or task status
+- one-off plans
+- transient context
 - generic chat
-- repeated already-known facts
+- repeated or already-known information
+- assistant-only content that does not reveal a stable user trait
 
-Return JSON ONLY:
+Decision principles:
+- Be highly conservative
+- Write only if the information is likely to remain true or useful over time
+- Prefer information that would materially improve future responses if remembered
+- If the information is specific only to the current task, do not write it
+- Use importance as a supporting signal, but durability matters more than importance
+
+Return JSON ONLY with exactly this schema:
 {
   "should_write": boolean,
   "note": string,
@@ -247,14 +263,33 @@ Return JSON ONLY:
 }
 
 Rules:
-- If should_write=false: note="", tags=[]
-- Keep note concise and atomic (<=30 words)
-- confidence in [0,1]
-- tags should be short keywords"""
+- If should_write is false:
+  - note = ""
+  - tags = []
+- If should_write is true:
+  - note must be non-empty
+  - note must contain exactly one concise atomic memory statement
+- note:
+  - must describe only durable user-profile information
+  - must be self-contained and reusable
+  - must be <= 30 words
+- confidence:
+  - float between 0.0 and 1.0
+  - reflects confidence that the memory is both correct and durable
+- tags:
+  - short, non-redundant keywords
+  - lowercase preferred
+
+Return ONLY valid JSON and no extra text."""
 
 
 EVERGREEN_DECISION_PAYLOAD_TEMPLATE = """Importance Score: {importance}
 
 Current Turn:
 - User: {user}
-- Assistant: {assistant}"""
+- Assistant: {assistant}
+
+Instruction:
+Decide whether this turn reveals durable user-profile information that should be stored in the Evergreen Diary.
+If yes, extract one reusable long-term memory note.
+If not, return an empty record following the schema."""
