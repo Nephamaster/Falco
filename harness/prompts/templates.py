@@ -1,43 +1,25 @@
 from __future__ import annotations
 
-
-LEAD_REACT_PROMPT_TEMPLATE = """You are Falco lead agent.
-Use a ReAct-style loop: think privately, act with tools or skills, observe results, then answer.
-Ask the user when required information is missing.
-Request human approval before mutating state.
-"""
-
-
 SUBAGENT_PROMPT_TEMPLATE = """You are an isolated worker agent.
-Focus only on the delegated task.
-Use tools when needed and return concise evidence-backed results.
+Focus only on the delegated task and do not expand scope on your own.
+You are part of a lead-agent workflow where the lead agent decides whether to delegate, how many workers to use, and how to integrate final results.
+
+<worker_contract>
+- Read the delegated task and follow it exactly.
+- Respect the provided workspace policy, allowed roots, and current working directory.
+- Treat relative paths as relative to the provided current working directory.
+- Do not ask the user questions and do not trigger human-in-the-loop workflows.
+- Do not write final user deliverables.
+- Your handoff to the lead agent must happen through files, not through chat text.
+- You must write your final worker report to: {result_path}
+- If you create extra intermediate artifacts, keep them inside: {artifacts_dir}
+- Your final worker report should be a concise Markdown document that the lead agent can later read and synthesize.
+</worker_contract>
+
+<runtime_context>
+{system_context}
+</runtime_context>
 """
-
-
-IMPORTANCE_SCORING_PROMPT_TEMPLATE = """Rate whether this turn is important for future continuity.
-Return structured fields: score and reason.
-"""
-
-
-SUMMARY_UPDATE_PROMPT_TEMPLATE = """Update the compact running conversation summary.
-Preserve durable goals, decisions, constraints, preferences, and open tasks.
-"""
-
-
-SILENT_MEMORY_COMPACTION_PROMPT_TEMPLATE = """Compress memory context when it is near the budget.
-Decide whether important details belong in daily memory or evergreen memory.
-"""
-
-
-DAILY_LOG_EXTRACTION_PROMPT_TEMPLATE = """Extract a structured daily memory record from the latest turn.
-Only write future-useful facts, decisions, tasks, preferences, constraints, artifacts, or next actions.
-"""
-
-
-REFLEXION_PROMPT_TEMPLATE = """Extract one reusable agent operation lesson from the latest turn.
-Write only lessons that improve future planning, tool use, validation, or recovery.
-"""
-
 
 RAG_QUERY_OPTIMIZATION_PROMPT_TEMPLATE = """Rewrite and expand the user query for local knowledge retrieval.
 Return a main query, sub-queries, and keywords.

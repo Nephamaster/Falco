@@ -4,6 +4,8 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from langchain_openai import ChatOpenAI
+
 from harness.agents.memory.mixins.context import MemoryContextMixin
 from harness.agents.memory.mixins.inference import MemoryInferenceMixin
 from harness.agents.memory.mixins.store import MemoryStoreMixin
@@ -26,8 +28,8 @@ class ConversationMemoryManager(
     root: Path
     max_history: int = 60
     max_facts: int = 50
-    recent_rounds: int = 6
-    key_rounds: int = 4
+    recent_rounds: int = 10
+    key_rounds: int = 10
     importance_threshold: int = 7
     max_rounds: int = 160
     daily_half_life_days: int = 30
@@ -75,7 +77,7 @@ class ConversationMemoryManager(
                 evicted = turns[: len(turns) - self.max_rounds]
                 pending_evicted = memory.setdefault("pending_evicted_turns", [])
                 pending_evicted.extend(self._serialize_turn_for_retention(item) for item in evicted)
-                memory["pending_evicted_turns"] = pending_evicted[-max(24, self.key_rounds * 10) :]
+                memory["pending_evicted_turns"] = pending_evicted[-max(24, self.key_rounds * 2) :]
             memory["turns"] = turns[-self.max_rounds :]
             memory["next_turn_id"] = turn_id + 1
 

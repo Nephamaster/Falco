@@ -31,7 +31,7 @@ class MemoryInferenceMixin:
     def _score_importance(self, user: str, assistant: str, llm: ChatOpenAI = None) -> ImportanceScore:
         if llm is None:
             return self._heuristic_importance(user, assistant)
-        dialogue = f"User:\n{user}\n\nAssistant:\n{assistant}"
+        dialogue = f"User:\n{user}\nAssistant:\n{assistant}"
         prompt = SCORE_IMPORTANCE_PROMPT.format(dialogue=dialogue)
         try:
             scorer = llm.with_structured_output(ImportanceScore)
@@ -97,8 +97,13 @@ class MemoryInferenceMixin:
         critical_lines = self._format_critical_turns_for_prompt(critical_turns)
         if llm is None:
             fallback_note = self._build_silent_daily_note_from_turns(critical_turns)
+            fallback_summary = self._build_silent_fallback_summary(
+                summary=summary,
+                latest_turn=latest_turn,
+                critical_turns=critical_turns,
+            )
             return SilentTurnDecision(
-                compressed_summary=self._truncate(context_snapshot, 1600),
+                compressed_summary=fallback_summary,
                 write_daily=bool(fallback_note) or int(latest_turn.get("importance", 0)) >= self.importance_threshold,
                 daily_note=self._truncate(
                     fallback_note or f"silent: {latest_turn.get('user', '')} | {latest_turn.get('assistant', '')}",
@@ -127,13 +132,58 @@ class MemoryInferenceMixin:
             result.evergreen_note = self._truncate(result.evergreen_note.strip(), 320)
             return result
         except Exception:
+            fallback_summary = self._build_silent_fallback_summary(
+                summary=summary,
+                latest_turn=latest_turn,
+                critical_turns=critical_turns,
+            )
             return SilentTurnDecision(
-                compressed_summary=self._truncate(context_snapshot, 1600),
+                compressed_summary=fallback_summary,
                 write_daily=bool(critical_turns),
                 daily_note=self._build_silent_daily_note_from_turns(critical_turns),
                 write_evergreen=False,
                 evergreen_note="",
             )
+
+    def _build_silent_fallback_summary(
+        self,
+        *,
+        summary: str,
+        latest_turn: dict[str, Any],
+        critical_turns: list[dict[str, Any]],
+    ) -> str:
+        sections: list[str] = []
+        clean_summary = summary.strip()
+        if clean_summary:
+            sections.append(clean_summary)
+
+        latest_user = self._truncate(str(latest_turn.get("user", "")), 180)
+        latest_assistant = self._truncate(str(latest_turn.get("assistant", "")), 180)
+        latest_bits = [part for part in (latest_user, latest_assistant) if part]
+        if latest_bits:
+            sections.append("Latest turn: " + " | ".join(latest_bits))
+
+        if critical_turns:
+            retained_lines = []
+            for turn in critical_turns[:4]:
+                turn_bits = []
+                user_text = self._truncate(str(turn.get("user", "")), 120)
+                assistant_text = self._truncate(str(turn.get("assistant", "")), 120)
+                if user_text:
+                    turn_bits.append(f"user={user_text}")
+                if assistant_text:
+                    turn_bits.append(f"assistant={assistant_text}")
+                if turn_bits:
+                    retained_lines.append(
+                        f"Turn {int(turn.get('id', 0))} (importance={int(turn.get('importance', 0))}): "
+                        + " | ".join(turn_bits)
+                    )
+            if retained_lines:
+                sections.append("Retained key turns:\n" + "\n".join(retained_lines))
+
+        if not sections:
+            return ""
+        return self._truncate("\n\n".join(sections), 1800)
 
     def _extract_evergreen_note(self, user: str, assistant: str) -> str:
         text = user.strip()
@@ -374,7 +424,7 @@ class MemoryInferenceMixin:
     ) -> str:
         low = text.lower()
         if preferences:
-            return "user_preference"
+            return "preference"
         if constraints:
             return "constraint"
         if tasks or re.search(r"\b(todo|task|deadline|due|implement|fix|deploy|test)\b", low):
@@ -382,8 +432,8 @@ class MemoryInferenceMixin:
         if re.search(r"\b(decision|decide|agreed|final)\b", low):
             return "decision"
         if re.search(r"\b(error|bug|failed|incident|regression)\b", low):
-            return "issue"
-        return "conversation"
+            return "info"
+        return "other"
 
     def _infer_daily_tags(self, text: str) -> list[str]:
         tags: list[str] = []

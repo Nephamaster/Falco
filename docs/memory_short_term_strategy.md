@@ -17,11 +17,14 @@ Falco memory context now includes:
 
 ## Config
 
-```bash
-FALCO_MEMORY_RECENT_ROUNDS=6
-FALCO_MEMORY_KEY_ROUNDS=4
-FALCO_MEMORY_IMPORTANCE_THRESHOLD=7
-FALCO_MEMORY_MAX_ROUNDS=160
+Configure these values in `config.yaml`:
+
+```yaml
+memory:
+  recent_rounds: 6
+  key_rounds: 4
+  importance_threshold: 7
+  max_rounds: 160
 ```
 
 ## Storage

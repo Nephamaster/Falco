@@ -142,15 +142,11 @@ class MemoryContextMixin:
                 latest_turn=turns[-1],
                 critical_turns=critical_turns,
             )
-            if decision.compressed_summary.strip():
-                memory["global_summary"] = self._truncate(decision.compressed_summary.strip(), 1800)
-            memory["last_silent_turn_id"] = latest_turn_id
-            memory["pending_evicted_turns"] = []
-            self.save(thread_id, memory)
 
             fallback_daily_note = self._build_silent_daily_note_from_turns(critical_turns)
             daily_note = decision.daily_note.strip() or fallback_daily_note
             should_write_daily = decision.write_daily or bool(daily_note and critical_turns)
+            wrote_daily = False
             if should_write_daily and daily_note:
                 self._append_daily_record(
                     day=today_str(),
@@ -161,7 +157,7 @@ class MemoryContextMixin:
                         decision=DailyLogRecordDecision(
                             should_write=True,
                             summary=daily_note,
-                            category="memory_maintenance",
+                            category="other",
                             confidence=0.8,
                             tags=["silent-turn", "compaction"],
                         ),
@@ -169,6 +165,9 @@ class MemoryContextMixin:
                         turn_id=latest_turn_id,
                     ),
                 )
+                wrote_daily = True
+
+            wrote_evergreen = False
             if decision.write_evergreen and decision.evergreen_note.strip():
                 self._append_evergreen_entry(
                     note=self._truncate(decision.evergreen_note.strip(), 320),
@@ -176,6 +175,18 @@ class MemoryContextMixin:
                     source="silent",
                     thread_id=thread_id,
                 )
+                wrote_evergreen = True
+
+            compressed_summary = self._truncate(decision.compressed_summary.strip(), 1800)
+            retained_any = bool(compressed_summary) or wrote_daily or wrote_evergreen
+            if not retained_any:
+                return
+
+            if compressed_summary:
+                memory["global_summary"] = compressed_summary
+            memory["last_silent_turn_id"] = latest_turn_id
+            memory["pending_evicted_turns"] = []
+            self.save(thread_id, memory)
 
     def _select_key_turns(
         self,

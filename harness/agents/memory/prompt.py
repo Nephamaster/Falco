@@ -6,10 +6,10 @@ Dialogue:
 Evaluate its importance for future context continuity.
 
 Return your answer in the following JSON format ONLY:
-{
+{{
   "score": <integer from 1 to 10>,
   "reason": "<brief explanation>"
-}
+}}
 
 Scoring guidelines:
 - 9-10: Critical information (user goals, long-term plans, key decisions, constraints, personal facts, ongoing tasks)
@@ -36,9 +36,9 @@ Update the summary using the new dialogue turn.
 {dialogue}
 
 Return your answer in the following JSON format ONLY:
-{
+{{
   "summary": <updated summary>
-}
+}}
 
 Guidelines:
 - Keep only important information: user goals, preferences, constraints, decisions, key facts, and open tasks
@@ -95,13 +95,13 @@ Conflict handling:
 - If new information conflicts with old summary, keep the latest version
 
 Return ONLY valid JSON with exactly these fields:
-{
+{{
   "compressed_summary": string,
   "write_daily": boolean,
   "daily_note": string,
   "write_evergreen": boolean,
   "evergreen_note": string
-}
+}}
 
 Output requirements:
 - `compressed_summary` should be concise, information-dense, and written in clear prose
@@ -132,21 +132,83 @@ Instruction:
 """
 
 
-REFLECTION_DECISION_PROMPT = """You are Falco's reflexion module. Extract one reusable operational lesson from the latest turn.
-Write only if the lesson will improve future agent behavior, tool choice, validation, planning, or error recovery.
-Do not store user private facts here; those belong to user memory.
-Return JSON: should_write, lesson, trigger, recommendation, confidence, tags.
-Keep lesson and recommendation concise."""
+REFLECTION_DECISION_PROMPT = """You are the Reflexion module of an AI agent.
+Your role is to extract ONE reusable operational lesson from the latest turn, if and only if it can improve future agent behavior.
+This is NOT user memory. Do NOT store user facts, preferences, or profile information.
+
+Your goal is to produce a generalizable lesson that can help with:
+- planning
+- tool selection
+- reasoning strategy
+- validation and verification
+- error handling and recovery
+- execution efficiency
+
+Write ONLY if:
+- there is a clear success, failure, or inefficiency
+- the lesson can be generalized beyond this specific case
+- the lesson would meaningfully improve future decisions
+
+Do NOT write if:
+- the turn is trivial or routine
+- no mistake, insight, or improvement opportunity is present
+- the lesson would be obvious or redundant
+- the content is specific to this exact case and not reusable
+
+What to extract:
+- lesson:
+  A generalized insight (not tied to this specific example)
+- trigger:
+  The condition or pattern where this lesson should be applied in the future
+- recommendation:
+  A concrete action or strategy the agent should follow when the trigger occurs
+
+Quality requirements:
+- The lesson must be reusable across similar situations
+- Avoid copying or paraphrasing the original dialogue
+- Prefer abstraction over description
+- Be specific enough to guide behavior, not vague advice
+
+Output JSON ONLY with this schema:
+{
+  "should_write": boolean,
+  "lesson": string,
+  "trigger": string,
+  "recommendation": string,
+  "confidence": float,
+  "tags": string[]
+}
+
+Field rules:
+- If should_write is false:
+  - lesson = ""
+  - trigger = ""
+  - recommendation = ""
+  - tags = []
+- If should_write is true:
+  - all of lesson, trigger, recommendation must be non-empty
+
+Formatting:
+- lesson: one concise sentence (<= 30 words)
+- trigger: one concise condition (<= 25 words)
+- recommendation: one concise action rule (<= 30 words)
+- confidence: float in [0.0, 1.0], reflecting usefulness and generality
+- tags: short keywords (e.g., "tool-selection", "validation", "error-handling")
+
+Return ONLY valid JSON and no extra text."""
 
 
-REFLECTION_DECISION_PAYLOAD_TEMPLATE = """User:
-{user}
+REFLECTION_DECISION_PAYLOAD_TEMPLATE = """Current Turn:
+- User: {user}
+- Assistant: {assistant}
 
-Assistant:
-{assistant}
+Tool Observations (may include errors, results, or signals):
+{observations}
 
-Tool observations:
-{observations}"""
+Instruction:
+Analyze this turn and decide whether a reusable operational lesson can be extracted.
+Focus on agent behavior, not user content.
+"""
 
 
 DAILY_LOG_DECISION_PROMPT = """You are deciding whether the current dialogue turn should be written into a structured Daily Log record.
@@ -183,7 +245,7 @@ Do not write:
 - content with no plausible future use
 
 Return JSON ONLY with exactly these fields:
-{
+{{
   "should_write": boolean,
   "summary": string,
   "category": string,
@@ -196,7 +258,7 @@ Return JSON ONLY with exactly these fields:
   "artifacts": string[],
   "next_actions": string[],
   "tags": string[]
-}
+}}
 
 Rules:
 - If should_write is false:
@@ -206,18 +268,18 @@ Rules:
   - at least one of summary, facts, decisions, tasks, user_preferences, constraints, artifacts, next_actions must be non-empty
 - summary must be one concise sentence, <= 40 words
 - category must be exactly one of:
-  ["task", "decision", "progress", "constraint", "preference", "artifact", "info", "other"]
+  ["task", "decision", "progress", "constraint", "preference", "artifact", "info", "issue", "other"]
 - confidence must be a float from 0.0 to 1.0
 - Every list item must be concise, atomic, and non-redundant
 - tags must be short keywords
 
 Return ONLY valid JSON."""
 
-DAILY_LOG_DECISION_PAYLOAD_TEMPLATE = """Importance Score: {importance}
-
-Current Turn:
+DAILY_LOG_DECISION_PAYLOAD_TEMPLATE = """Current Turn:
 - User: {user}
 - Assistant: {assistant}
+
+Importance Score: {importance}
 
 Instruction:
 Decide whether this turn should be stored in the Daily Log.
@@ -255,12 +317,12 @@ Decision principles:
 - Use importance as a supporting signal, but durability matters more than importance
 
 Return JSON ONLY with exactly this schema:
-{
+{{
   "should_write": boolean,
   "note": string,
   "confidence": float,
   "tags": string[]
-}
+}}
 
 Rules:
 - If should_write is false:
@@ -283,11 +345,11 @@ Rules:
 Return ONLY valid JSON and no extra text."""
 
 
-EVERGREEN_DECISION_PAYLOAD_TEMPLATE = """Importance Score: {importance}
-
-Current Turn:
+EVERGREEN_DECISION_PAYLOAD_TEMPLATE = """Current Turn:
 - User: {user}
 - Assistant: {assistant}
+
+Importance Score: {importance}
 
 Instruction:
 Decide whether this turn reveals durable user-profile information that should be stored in the Evergreen Diary.

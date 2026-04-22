@@ -13,17 +13,25 @@
   - `POST /api/v1/rag/search`
   - `POST /api/v1/rag/index`
 
-## Environment variables
+## Configuration
+
+Put non-sensitive values in `config.yaml`:
+
+```yaml
+rag:
+  enabled: true
+  milvus_uri: ./.falco/milvus/falco_rag.db
+  collection: falco_knowledge
+  embedding_model: text-embedding-3-small
+  top_k: 5
+  fetch_k: 18
+  reranker_model: cross-encoder/ms-marco-MiniLM-L-6-v2
+```
+
+Keep the sensitive Milvus token in `.env`:
 
 ```bash
-FALCO_RAG_ENABLED=true
-FALCO_RAG_MILVUS_URI=./.falco/milvus/falco_rag.db
-FALCO_RAG_MILVUS_TOKEN=
-FALCO_RAG_COLLECTION=falco_knowledge
-FALCO_RAG_EMBEDDING_MODEL=text-embedding-3-small
-FALCO_RAG_TOP_K=5
-FALCO_RAG_FETCH_K=18
-FALCO_RAG_RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
+FALCO_RAG_MILVUS_TOKEN=...
 ```
 
 ## Index local knowledge
@@ -71,5 +79,5 @@ curl -X POST http://127.0.0.1:8000/api/v1/rag/search \
 
 ## Important note on hybrid retrieval
 
-- If `FALCO_RAG_MILVUS_URI` points to local `*.db` (Milvus Lite), implementation will automatically degrade to dense retrieval.
+- If `rag.milvus_uri` points to local `*.db` (Milvus Lite), implementation will automatically degrade to dense retrieval.
 - Full hybrid sparse+dense requires Milvus server mode that supports built-in BM25 sparse function.

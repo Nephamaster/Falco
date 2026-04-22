@@ -9,5 +9,6 @@ pymilvus
 sentence-transformers
 tiktoken
 python-dotenv
+pyyaml
 fastapi
 uvicorn[standard]

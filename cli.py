@@ -87,10 +87,11 @@ def _choose_thread_id(settings: FalcoSettings) -> str:
 
 
 def main() -> None:
-    settings = FalcoSettings.from_env()
+    settings = FalcoSettings.from_yaml(Path(__file__).resolve().parent / "config.yaml")
     orchestrator = FalcoOrchestrator(settings)
     thread_id = _choose_thread_id(settings)
     print("Commands: /thread <name>, /sessions, quit")
+    awaiting_resume = False
     while True:
         user_input = input("User: ").strip()
         if user_input.lower() in {"q", "quit", "exit"}:
@@ -102,9 +103,14 @@ def main() -> None:
             continue
         if user_input.startswith("/thread "):
             thread_id = _safe_thread_id(user_input.replace("/thread ", "", 1).strip() or "default")
+            awaiting_resume = False
             print(f"Switched thread_id to: {thread_id}")
             continue
-        output = orchestrator.invoke(user_input=user_input, thread_id=thread_id)
+        if awaiting_resume:
+            output = orchestrator.resume(user_input=user_input, thread_id=thread_id)
+        else:
+            output = orchestrator.invoke(user_input=user_input, thread_id=thread_id)
+        awaiting_resume = output.startswith("HUMAN_INPUT_REQUIRED") or output.startswith("HUMAN_APPROVAL_REQUIRED")
         print(f"Falco: {output}")
 
 

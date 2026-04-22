@@ -17,12 +17,16 @@ class MemoryUtilityMixin:
     def _tokenizer_model(self) -> str:
         return getattr(self, "tokenizer_model", "gpt-4o-mini")
 
+    @staticmethod
     @lru_cache(maxsize=4)
-    def _get_encoding(self, model_name: str):
+    def _get_encoding_for_model(model_name: str):
         try:
             return tiktoken.encoding_for_model(model_name)
         except Exception:
             return tiktoken.get_encoding("cl100k_base")
+
+    def _get_encoding(self, model_name: str):
+        return self._get_encoding_for_model(model_name)
 
     def _count_tokens(self, text: str) -> int:
         if not text:
@@ -85,32 +89,53 @@ class MemoryUtilityMixin:
 
     def _history_to_turns(self, history: list[dict]) -> list[dict]:
         turns: list[dict] = []
-        pending_user = ""
+        pending_user_parts: list[str] = []
+        pending_assistant_parts: list[str] = []
         pending_ts = None
         turn_id = 0
+
+        def flush_pending() -> None:
+            nonlocal turn_id, pending_user_parts, pending_assistant_parts, pending_ts
+            if not pending_user_parts and not pending_assistant_parts:
+                pending_ts = None
+                return
+            turn_id += 1
+            turns.append(
+                {
+                    "id": turn_id,
+                    "ts": pending_ts or utc_now(),
+                    "user": "\n".join(part for part in pending_user_parts if part).strip(),
+                    "assistant": "\n".join(part for part in pending_assistant_parts if part).strip(),
+                    "importance": 5,
+                    "importance_reason": "migrated",
+                    "is_key": False,
+                }
+            )
+            pending_user_parts = []
+            pending_assistant_parts = []
+            pending_ts = None
+
         for item in history:
             role = item.get("role")
             content = str(item.get("content", "")).strip()
+            if not content:
+                continue
             ts = item.get("ts", utc_now())
             if role == "user":
-                pending_user = content
-                pending_ts = ts
+                if pending_assistant_parts:
+                    flush_pending()
+                if pending_ts is None:
+                    pending_ts = ts
+                pending_user_parts.append(content)
                 continue
             if role == "assistant":
-                turn_id += 1
-                turns.append(
-                    {
-                        "id": turn_id,
-                        "ts": pending_ts or ts,
-                        "user": pending_user,
-                        "assistant": content,
-                        "importance": 5,
-                        "importance_reason": "migrated",
-                        "is_key": False,
-                    }
-                )
-                pending_user = ""
-                pending_ts = None
+                if pending_ts is None:
+                    pending_ts = ts
+                pending_assistant_parts.append(content)
+                continue
+            flush_pending()
+
+        flush_pending()
         return turns[-self.max_rounds :]
 
     def _render_with_budget(self, sections: list[str], *, max_tokens: int) -> str:

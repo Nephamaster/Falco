@@ -1,0 +1,74 @@
+config_version: 2
+
+model:
+  id: qwen3-32b
+  base_url: http://127.0.0.1:9999/v1
+
+secrets:
+  llm_api_key_env: LLM_API_KEY
+  rag_milvus_token_env: FALCO_RAG_MILVUS_TOKEN
+
+workspace:
+  root: .
+  allowed_roots:
+    - ./workspace
+    - ./.falco
+  default_working_directory: ./workspace
+  uploads_root: ./workspace/uploads
+  runtime_root: ./workspace/runtime
+  deliverables_root: ./workspace/deliverables
+  thread_scoped_directories: true
+
+agent:
+  max_context_messages: 12
+  max_tool_steps: 6
+  max_subagents: 4
+  subagent_max_steps: 4
+
+service:
+  cors_origins:
+    - http://127.0.0.1:1357
+    - http://localhost:1357
+
+memory:
+  root: ./.falco/memory
+  recent_rounds: 10
+  key_rounds: 10
+  importance_threshold: 7
+  max_rounds: 30
+  context_soft_limit_tokens: 8192
+  context_max_tokens: 10000
+  silent_turn_cooldown_rounds: 4
+  daily_half_life_days: 30
+  daily_lookback_days: 180
+  daily_retrieval_items: 8
+  evergreen_retrieval_items: 5
+
+skills:
+  public_root: ./skills
+  user_roots:
+    - ./.falco/skills
+
+rag:
+  enabled: true
+  milvus_uri: ./.falco/milvus/falco_rag.db
+  collection: falco_knowledge
+  embedding_model: text-embedding-3-small
+  retrieval_mode: dense
+  hybrid_dense_weight: 0.7
+  hybrid_sparse_weight: 0.3
+  top_k: 5
+  fetch_k: 18
+  rerank_enabled: true
+  rerank_top_n: 18
+  reranker_model: cross-encoder/ms-marco-MiniLM-L-6-v2
+  query_planning_enabled: true
+  max_sub_queries: 3
+  max_keywords: 8
+  index_chunk_size: 900
+  index_chunk_overlap: 120
+
+mcp:
+  enabled: false
+  config_path: ./.falco/mcp.json
+  tool_prefix: true

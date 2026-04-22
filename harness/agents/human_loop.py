@@ -44,6 +44,7 @@ class HumanLoopManager:
         *,
         thread_id: str,
         question: str,
+        clarification_type: str = "missing_info",
         context: str = "",
         options: list[str] | None = None,
     ) -> dict[str, Any]:
@@ -53,6 +54,7 @@ class HumanLoopManager:
             "status": "pending",
             "created_at": _utc_now(),
             "question": question.strip(),
+            "clarification_type": clarification_type.strip() or "missing_info",
             "context": context.strip(),
             "options": [item.strip() for item in (options or []) if item.strip()][:6],
         }
@@ -69,6 +71,7 @@ class HumanLoopManager:
         action: str,
         payload: dict[str, Any],
         rationale: str,
+        question: str = "",
     ) -> dict[str, Any]:
         item = {
             "id": f"hitl_{uuid.uuid4().hex[:10]}",
@@ -77,6 +80,7 @@ class HumanLoopManager:
             "created_at": _utc_now(),
             "action": action,
             "payload": payload,
+            "question": question.strip(),
             "rationale": rationale.strip(),
         }
         with self._lock:

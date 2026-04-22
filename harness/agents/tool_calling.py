@@ -11,7 +11,23 @@ from langchain_core.messages import AIMessage
 def coerce_json_tool_call(message: AIMessage, valid_tool_names: set[str]) -> AIMessage:
     """Convert plain JSON tool-call text into LangChain tool_calls when needed."""
     if message.tool_calls:
-        return message
+        normalized_tool_calls = []
+        changed = False
+        for tool_call in message.tool_calls:
+            normalized = dict(tool_call)
+            args = _normalize_tool_args(normalized.get("name", ""), normalized.get("args"))
+            if args != normalized.get("args"):
+                normalized["args"] = args
+                changed = True
+            normalized_tool_calls.append(normalized)
+        if not changed:
+            return message
+        return AIMessage(
+            content=message.content,
+            tool_calls=normalized_tool_calls,
+            additional_kwargs=message.additional_kwargs,
+            response_metadata=message.response_metadata,
+        )
 
     parsed = _parse_tool_call_payload(message.content)
     if parsed is None:
@@ -121,4 +137,24 @@ def _coerce_args(args: Any) -> Any:
             return json.loads(args)
         except json.JSONDecodeError:
             return {}
+    return args
+
+
+def _normalize_tool_args(name: str, args: Any) -> Any:
+    if isinstance(args, dict):
+        return args
+    if name == "use_skill" and isinstance(args, list):
+        normalized: dict[str, Any] = {}
+        if len(args) >= 1:
+            normalized["skill_name"] = args[0]
+        if len(args) >= 2:
+            normalized["action"] = args[1]
+        if len(args) >= 3:
+            third = args[2]
+            normalized["args"] = third if isinstance(third, dict) else {}
+        if len(args) >= 4:
+            normalized["approved_request_id"] = args[3]
+        return normalized
+    if isinstance(args, list):
+        return {"args": args}
     return args

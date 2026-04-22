@@ -22,7 +22,7 @@ class FalcoRuntime:
             from harness.agents.secretary.wake import FalcoOrchestrator
             from harness.config.config import FalcoSettings
 
-            settings = FalcoSettings.from_env(workspace_root=root)
+            settings = FalcoSettings.from_yaml(root / "config.yaml")
             self._orchestrator = FalcoOrchestrator(settings=settings)
             return self._orchestrator
 

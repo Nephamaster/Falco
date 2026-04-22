@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from collections.abc import AsyncIterator
 
 from fastapi import FastAPI
@@ -26,8 +25,8 @@ app = FastAPI(title="Falco Service", version="0.1.0")
 
 
 def _cors_origins() -> list[str]:
-    raw = os.getenv("FALCO_CORS_ORIGINS", "http://127.0.0.1:1357,http://localhost:1357")
-    origins = [item.strip() for item in raw.split(",") if item.strip()]
+    orchestrator = runtime.get_orchestrator()
+    origins = [item.strip() for item in orchestrator.settings.cors_origins if item.strip()]
     return origins or ["http://127.0.0.1:1357"]
 
 

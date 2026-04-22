@@ -33,7 +33,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    settings = FalcoSettings.from_env()
+    settings = FalcoSettings.from_yaml(Path(__file__).resolve().parents[1] / "config.yaml")
     llm = ChatOpenAI(
         model=settings.model,
         api_key=settings.api_key,

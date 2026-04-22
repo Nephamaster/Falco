@@ -19,17 +19,20 @@ Implemented items from OpenClaw "four-stage retrieval flow" scope requested in t
 - Daily notes are ranked by `importance * time_decay + query relevance`.
 - Retrieved long-term memory is injected into the memory context with budget control.
 
-## New environment variables
+## Config
 
-```bash
-FALCO_MEMORY_ROOT=./.falco/memory
-FALCO_MEMORY_CONTEXT_SOFT_LIMIT_CHARS=7000
-FALCO_MEMORY_CONTEXT_MAX_CHARS=9000
-FALCO_MEMORY_SILENT_TURN_COOLDOWN_ROUNDS=4
-FALCO_MEMORY_DAILY_HALF_LIFE_DAYS=30
-FALCO_MEMORY_DAILY_LOOKBACK_DAYS=180
-FALCO_MEMORY_DAILY_RETRIEVAL_ITEMS=8
-FALCO_MEMORY_EVERGREEN_RETRIEVAL_ITEMS=5
+Use `config.yaml`:
+
+```yaml
+memory:
+  root: ./.falco/memory
+  context_soft_limit_tokens: 7000
+  context_max_tokens: 9000
+  silent_turn_cooldown_rounds: 4
+  daily_half_life_days: 30
+  daily_lookback_days: 180
+  daily_retrieval_items: 8
+  evergreen_retrieval_items: 5
 ```
 
-`FALCO_MEMORY_ROOT` can be absolute or relative path.
+`memory.root` can be absolute or relative path.

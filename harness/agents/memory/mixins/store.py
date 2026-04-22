@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from harness.agents.memory.models import (
+    DAILY_LOG_ALLOWED_CATEGORIES,
     DAILY_LOG_SCHEMA_VERSION,
     EVERGREEN_REFLECTION_MODULE,
     EVERGREEN_SCHEMA_VERSION,
@@ -17,6 +18,22 @@ from harness.agents.memory.runtime import parse_ts, utc_now
 
 
 class MemoryStoreMixin:
+    _CATEGORY_ALIASES = {
+        "conversation": "other",
+        "general": "other",
+        "misc": "other",
+        "memory_maintenance": "other",
+        "maintenance": "other",
+        "user_preference": "preference",
+        "preferences": "preference",
+        "fact": "info",
+        "facts": "info",
+        "issue": "info",
+        "problem": "info",
+        "error": "info",
+        "artifact_update": "artifact",
+    }
+
     @property
     def daily_root(self) -> Path:
         return self.root / "daily"
@@ -200,7 +217,7 @@ class MemoryStoreMixin:
         normalized.setdefault("source", "dialogue_turn")
         normalized.setdefault("thread_id", "default")
         normalized.setdefault("importance", 5)
-        normalized.setdefault("category", "conversation")
+        normalized.setdefault("category", "other")
         normalized.setdefault("confidence", 0.7)
         normalized.setdefault("summary", "")
         normalized.setdefault("facts", [])
@@ -223,7 +240,7 @@ class MemoryStoreMixin:
             ("tags", 8),
         ]:
             normalized[key] = self._normalize_daily_list_field(normalized.get(key), limit=limit)
-        normalized["category"] = self._normalize_category(str(normalized.get("category", "conversation")))
+        normalized["category"] = self._normalize_category(str(normalized.get("category", "other")))
         normalized["importance"] = max(1, min(int(normalized.get("importance", 5)), 10))
         normalized["confidence"] = round(max(0.0, min(float(normalized.get("confidence", 0.7)), 1.0)), 2)
         return normalized
@@ -270,7 +287,12 @@ class MemoryStoreMixin:
 
     def _normalize_category(self, category: str) -> str:
         normalized = self._normalize_text(category).replace(" ", "_")
-        return normalized or "conversation"
+        if not normalized:
+            return "other"
+        normalized = self._CATEGORY_ALIASES.get(normalized, normalized)
+        if normalized not in DAILY_LOG_ALLOWED_CATEGORIES:
+            return "other"
+        return normalized
 
     def _daily_record_search_text(self, record: dict[str, Any]) -> str:
         facts = self._normalize_daily_list_field(record.get("facts"), limit=12)
@@ -291,7 +313,7 @@ class MemoryStoreMixin:
             " ".join(artifacts),
             " ".join(next_actions),
             " ".join(tags),
-            f"{record.get('category', 'conversation')}[{record.get('source', 'unknown')}]",
+            f"{record.get('category', 'other')}[{record.get('source', 'unknown')}]",
         ]
         return " ".join(str(part) for part in parts if part).strip()
 

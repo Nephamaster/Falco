@@ -4,11 +4,13 @@ Falco loads MCP servers as external tool providers. The lead agent and subagent 
 
 ## Enable
 
-Set:
+Set in `config.yaml`:
 
-```bash
-FALCO_MCP_ENABLED=true
-FALCO_MCP_CONFIG=.falco/mcp.json
+```yaml
+mcp:
+  enabled: true
+  config_path: ./.falco/mcp.json
+  tool_prefix: true
 ```
 
 The dependency is declared in `requirements.txt`:
@@ -47,11 +49,7 @@ By default, MCP tool names are prefixed:
 mcp_<server>_<tool>
 ```
 
-This prevents collisions with built-in tools and with other MCP servers. Disable with:
-
-```bash
-FALCO_MCP_TOOL_PREFIX=false
-```
+This prevents collisions with built-in tools and with other MCP servers. Disable it in `config.yaml` with `mcp.tool_prefix: false`.
 
 ## Agent Flow
 

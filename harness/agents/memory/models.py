@@ -2,6 +2,17 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+DAILY_LOG_ALLOWED_CATEGORIES = (
+    "task",
+    "decision",
+    "progress",
+    "constraint",
+    "preference",
+    "artifact",
+    "info",
+    "other",
+)
+
 
 class ImportanceScore(BaseModel):
     score: int = Field(ge=1, le=10)
@@ -23,7 +34,7 @@ class SilentTurnDecision(BaseModel):
 class DailyLogRecordDecision(BaseModel):
     should_write: bool = Field(default=False)
     summary: str = Field(default="")
-    category: str = Field(default="conversation")
+    category: str = Field(default="other")
     confidence: float = Field(default=0.7, ge=0, le=1)
     facts: list[str] = Field(default_factory=list)
     decisions: list[str] = Field(default_factory=list)

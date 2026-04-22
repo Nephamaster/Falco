@@ -10,3 +10,5 @@ class FalcoState(TypedDict, total=False):
     thread_id: str
     context_block: str
     skills_block: str
+    workspace_block: str
+    working_directory: str
