@@ -50,6 +50,7 @@ class FalcoOrchestrator:
 
         self._thread_id_ctx: ContextVar[str] = ContextVar("falco_thread_id", default="default")
         self._latest_user_ctx: ContextVar[str] = ContextVar("falco_latest_user", default="")
+        self._response_preference_ctx: ContextVar[str] = ContextVar("falco_response_preference", default="natural")
         self._resume_input_ctx: ContextVar[str] = ContextVar("falco_resume_input", default="")
         self._working_directory_ctx: ContextVar[str] = ContextVar(
             "falco_working_directory",
@@ -203,9 +204,11 @@ class FalcoOrchestrator:
                     latest_user_text = str(message.content or "")
                     break
             self._latest_user_ctx.set(latest_user_text)
+            self._response_preference_ctx.set(str(state.get("user_response_preference") or self._response_preference_ctx.get()))
 
             return {
                 "thread_id": tid,
+                "user_response_preference": self._response_preference_ctx.get(),
                 "context_block": self.memory.build_context_block(
                     tid,
                     max_items=self.settings.max_context_messages,
@@ -227,7 +230,9 @@ class FalcoOrchestrator:
             dynamic_prompt = SECRETARY_MIND_TEMPLATE.format(
                 soul=state.get("soul_block", "").strip(),
                 memory=context_block,
-                user_response_preference="",
+                user_response_preference=self._resolve_user_response_preference(
+                    str(state.get("user_response_preference") or self._response_preference_ctx.get()),
+                ),
                 working_environment=state.get("workspace_block", "").strip(),
                 skils=skills_block,
                 mcp=state.get("mcp_block", "").strip(),
@@ -345,11 +350,12 @@ class FalcoOrchestrator:
 
         return builder.compile(checkpointer=InMemorySaver())
 
-    def invoke(self, user_input: str, thread_id: str = "default") -> str:
+    def invoke(self, user_input: str, thread_id: str = "default", user_response_preference: str = "natural") -> str:
         self.memory_postprocess.flush_thread(thread_id)
         self._refresh_mcp_runtime_if_needed()
         self._thread_id_ctx.set(thread_id)
         self._latest_user_ctx.set(user_input)
+        self._response_preference_ctx.set(user_response_preference or "natural")
         self._resume_input_ctx.set("")
         working_directory = self._restore_thread_working_directory(thread_id)
         self._working_directory_ctx.set(working_directory)
@@ -360,6 +366,7 @@ class FalcoOrchestrator:
         state: FalcoState = {
             "messages": [HumanMessage(content=user_input)],
             "thread_id": thread_id,
+            "user_response_preference": user_response_preference or "natural",
             "working_directory": working_directory,
         }
         result = self.graph.invoke(state, config=config)
@@ -377,11 +384,12 @@ class FalcoOrchestrator:
                 return str(message.content)
         return ""
 
-    def resume(self, user_input: str, thread_id: str = "default") -> str:
+    def resume(self, user_input: str, thread_id: str = "default", user_response_preference: str = "natural") -> str:
         self.memory_postprocess.flush_thread(thread_id)
         self._refresh_mcp_runtime_if_needed()
         self._thread_id_ctx.set(thread_id)
         self._latest_user_ctx.set(user_input)
+        self._response_preference_ctx.set(user_response_preference or "natural")
         self._resume_input_ctx.set(user_input)
         self._working_directory_ctx.set(self._restore_thread_working_directory(thread_id))
         config = {
@@ -550,6 +558,16 @@ class FalcoOrchestrator:
         if not content:
             return ""
         return f"<soul>\n{content}\n</soul>"
+
+    def _resolve_user_response_preference(self, preference: str) -> str:
+        mapping = {
+            "natural": "- Natural Tone: Use clear paragraphs and natural prose by default\n- Action-Oriented: Focus on delivering useful results, not explaining internal process",
+            "concise": "- Concise: Keep replies short and direct\n- High Signal: Prioritize conclusions, decisions, and next actions over background detail",
+            "professional": "- Professional: Use structured, precise, businesslike language\n- Reliable: Emphasize clarity, correctness, and explicit recommendations",
+            "warm": "- Warm: Sound supportive, friendly, and collaborative\n- Clear: Stay approachable while still being practical and decisive",
+            "direct": "- Direct: Get to the point quickly and avoid unnecessary framing\n- Decisive: Prefer firm recommendations and explicit answers",
+        }
+        return mapping.get(preference, mapping["natural"])
 
     def _refresh_mcp_runtime_if_needed(self) -> None:
         if self.mcp.reload_if_needed():

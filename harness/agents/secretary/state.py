@@ -8,6 +8,7 @@ from langgraph.graph.message import add_messages
 class FalcoState(TypedDict, total=False):
     messages: Annotated[list, add_messages]
     thread_id: str
+    user_response_preference: str
     context_block: str
     soul_block: str
     skills_block: str

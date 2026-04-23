@@ -1,6 +1,8 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 import { fetchHealth, fetchMCPCatalog, streamChat } from "../lib/api";
 
@@ -13,6 +15,7 @@ type ChatSession = {
   id: string;
   title: string;
   threadId: string;
+  responsePreference: string;
   items: ChatItem[];
   updatedAt: number;
 };
@@ -28,6 +31,28 @@ const starterPrompts = [
   "基于已有技能和工具，帮我规划一个可执行的工作流。",
   "读取当前线程上下文，帮我总结状态并提出后续任务。",
 ];
+const responsePreferenceOptions = [
+  { value: "natural", label: "自然" },
+  { value: "concise", label: "简洁" },
+  { value: "professional", label: "专业" },
+  { value: "warm", label: "温和" },
+  { value: "direct", label: "直接" },
+];
+
+function MarkdownMessage({ content }: { content: string }) {
+  return (
+    <div className="message-markdown">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          a: ({ ...props }) => <a {...props} rel="noreferrer" target="_blank" />,
+        }}
+      >
+        {content}
+      </ReactMarkdown>
+    </div>
+  );
+}
 
 function createSession(seed?: Partial<ChatSession>): ChatSession {
   const timestamp = Date.now();
@@ -36,6 +61,7 @@ function createSession(seed?: Partial<ChatSession>): ChatSession {
     id,
     title: seed?.title || "新会话",
     threadId: seed?.threadId || id,
+    responsePreference: seed?.responsePreference || "natural",
     items: seed?.items || [
       {
         role: "assistant",
@@ -220,6 +246,7 @@ export default function HomePage() {
         apiBase,
         threadId,
         message,
+        userResponsePreference: activeSession.responsePreference,
         callbacks: {
           onDelta: (delta) => {
             setSessions((prev) =>
@@ -359,6 +386,25 @@ export default function HomePage() {
                   placeholder="default"
                 />
               </label>
+              <label>
+                <span>回复风格</span>
+                <select
+                  value={activeSession.responsePreference}
+                  onChange={(event) =>
+                    updateActiveSession((session) => ({
+                      ...session,
+                      responsePreference: event.target.value,
+                      updatedAt: Date.now(),
+                    }))
+                  }
+                >
+                  {responsePreferenceOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
               <button className="ghost-button" onClick={() => void refreshSystemState()} type="button">
                 刷新状态
               </button>
@@ -379,7 +425,13 @@ export default function HomePage() {
                 <div className="message-meta">
                   <span>{item.role === "user" ? "Operator" : "Falco"}</span>
                 </div>
-                <div className="message-content">{item.content || (item.role === "assistant" ? "..." : "")}</div>
+                <div className="message-content">
+                  {item.role === "assistant" ? (
+                    <MarkdownMessage content={item.content || "..."} />
+                  ) : (
+                    item.content || ""
+                  )}
+                </div>
               </article>
             ))}
           </section>

@@ -79,7 +79,11 @@ def mcp_catalog() -> MCPCatalogResponse:
 @app.post("/api/v1/chat", response_model=ChatResponse)
 def chat(payload: ChatRequest) -> ChatResponse:
     orchestrator = runtime.get_orchestrator()
-    answer = orchestrator.invoke(user_input=payload.message, thread_id=payload.thread_id)
+    answer = orchestrator.invoke(
+        user_input=payload.message,
+        thread_id=payload.thread_id,
+        user_response_preference=payload.user_response_preference,
+    )
     return ChatResponse(thread_id=payload.thread_id, answer=answer)
 
 
@@ -87,9 +91,13 @@ def _sse_event(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-async def _stream_answer(thread_id: str, message: str) -> AsyncIterator[str]:
+async def _stream_answer(thread_id: str, message: str, user_response_preference: str) -> AsyncIterator[str]:
     orchestrator = runtime.get_orchestrator()
-    answer = orchestrator.invoke(user_input=message, thread_id=thread_id)
+    answer = orchestrator.invoke(
+        user_input=message,
+        thread_id=thread_id,
+        user_response_preference=user_response_preference,
+    )
     yield _sse_event("start", {"thread_id": thread_id})
 
     for token in answer.split():
@@ -104,7 +112,11 @@ async def _stream_answer(thread_id: str, message: str) -> AsyncIterator[str]:
 @app.post("/api/v1/chat/stream")
 async def chat_stream(payload: ChatRequest) -> StreamingResponse:
     return StreamingResponse(
-        _stream_answer(thread_id=payload.thread_id, message=payload.message),
+        _stream_answer(
+            thread_id=payload.thread_id,
+            message=payload.message,
+            user_response_preference=payload.user_response_preference,
+        ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
