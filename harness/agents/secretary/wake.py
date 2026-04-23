@@ -13,6 +13,7 @@ from langgraph.types import Command, interrupt
 
 from harness.agents.human_loop import HumanLoopManager
 from harness.agents.memory.manager import ConversationMemoryManager
+from harness.agents.memory_postprocess import MemoryPostprocessQueue
 from harness.agents.secretary.mind import SECRETARY_MIND_TEMPLATE
 from harness.agents.secretary.state import FalcoState
 from harness.agents.thread_session import ThreadSessionManager
@@ -21,7 +22,6 @@ from harness.agents.subagent_tasks import SubAgentTaskManager
 from harness.agents.tool_calling import coerce_json_tool_call
 from harness.config.config import FalcoSettings
 from harness.mcp import MCPToolRegistry
-from harness.rag import MilvusRAG
 from harness.skills.skills import SkillManager
 from harness.tools.tools import create_core_tools, create_subagent_tools, execute_pending_approval
 from harness.workspace import WorkspaceManager
@@ -69,10 +69,14 @@ class FalcoOrchestrator:
             evergreen_retrieval_items=self.settings.memory_evergreen_retrieval_items,
             tokenizer_model=self.settings.model,
         )
+        self.memory_postprocess = MemoryPostprocessQueue()
         self.human_loop = HumanLoopManager(self.settings.workspace_root / ".falco" / "hitl")
         self.thread_sessions = ThreadSessionManager(self.settings.workspace_root / ".falco" / "threads")
         self.subagent_tasks = SubAgentTaskManager()
-        self.skills = SkillManager(self.settings.skills_root)
+        self.skills = SkillManager(
+            public_root=self.settings.skills_public_root,
+            user_roots=self.settings.skills_user_roots,
+        )
         self.mcp = MCPToolRegistry(
             config_path=self.settings.mcp_config_path,
             enabled=self.settings.mcp_enabled,
@@ -84,7 +88,6 @@ class FalcoOrchestrator:
             base_url=self.settings.base_url,
             temperature=0,
         )
-        self.rag = MilvusRAG(self.settings, llm=self.llm) if self.settings.rag_enabled else None
         self.mcp_tools = self.mcp.load_tools()
         self.graph = self._build_graph()
 
@@ -108,6 +111,7 @@ class FalcoOrchestrator:
                     llm=self.llm,
                     tools=create_subagent_tools(
                         workspace=self.workspace,
+                        settings=self.settings,
                         thread_id=thread_id,
                         worker_root=worker_root,
                     ),
@@ -152,7 +156,8 @@ class FalcoOrchestrator:
             memory=self.memory,
             human_loop=self.human_loop,
             skills=self.skills,
-            rag=self.rag,
+            settings=self.settings,
+            llm=self.llm,
             thread_id_getter=self._thread_id_ctx.get,
             latest_user_getter=self._latest_user_ctx.get,
             working_directory_getter=self._working_directory_ctx.get,
@@ -160,6 +165,7 @@ class FalcoOrchestrator:
             working_directory_persistor=self.thread_sessions.set_working_directory,
             resume_input_getter=self._resume_input_ctx.get,
             mcp_catalog_getter=self.mcp.catalog,
+            mcp_reload_getter=self._reload_mcp_tools_now,
             subagent_task_manager=self.subagent_tasks,
             subagent_task_runner=run_subagent_tasks_for_thread,
             max_subagents=self.settings.max_subagents,
@@ -208,7 +214,9 @@ class FalcoOrchestrator:
                     query_hint=latest_user_text,
                     max_tokens=self.settings.memory_context_max_tokens,
                 ),
+                "soul_block": self._load_soul_block(),
                 "skills_block": self.skills.get_prompt_block(),
+                "mcp_block": self.mcp.prompt_block(),
                 "workspace_block": self.workspace.prompt_block(thread_id=tid, cwd=working_directory),
                 "working_directory": str(working_directory),
             }
@@ -217,22 +225,38 @@ class FalcoOrchestrator:
             context_block = state.get("context_block", "").strip()
             skills_block = state.get("skills_block", "").strip()
             dynamic_prompt = SECRETARY_MIND_TEMPLATE.format(
-                soul="",
+                soul=state.get("soul_block", "").strip(),
                 memory=context_block,
                 user_response_preference="",
                 working_environment=state.get("workspace_block", "").strip(),
                 skils=skills_block,
+                mcp=state.get("mcp_block", "").strip(),
                 tools=build_tools_block(),
             )
-            response = model_with_tools.invoke(
-                [SystemMessage(content=dynamic_prompt), *state["messages"]]
-            )
-            if isinstance(response, AIMessage):
+            conversation = [SystemMessage(content=dynamic_prompt), *state["messages"]]
+            tool_message_count = sum(1 for message in state["messages"] if isinstance(message, ToolMessage))
+            tool_budget_reached = tool_message_count >= max(1, self.settings.max_tool_steps - 1)
+            if tool_budget_reached:
+                forced_prompt = (
+                    dynamic_prompt
+                    + "\n\n<tool_budget>\n"
+                    + "You have reached the tool-call budget for this turn. "
+                    + "Do not call any more tools. "
+                    + "Use the tool results already present in the conversation to produce the best possible final answer."
+                    + "\n</tool_budget>"
+                )
+                response = self.llm.invoke([SystemMessage(content=forced_prompt), *state["messages"]])
+            else:
+                response = model_with_tools.invoke(conversation)
+            if isinstance(response, AIMessage) and not tool_budget_reached:
                 response = coerce_json_tool_call(response, valid_tool_names)
             return {"messages": [response]}
 
         def route_next(state: FalcoState) -> Literal["tools", "persist"]:
             last = state["messages"][-1]
+            tool_message_count = sum(1 for message in state["messages"] if isinstance(message, ToolMessage))
+            if tool_message_count >= max(1, self.settings.max_tool_steps - 1):
+                return "persist"
             if isinstance(last, AIMessage) and last.tool_calls:
                 return "tools"
             return "persist"
@@ -274,28 +298,36 @@ class FalcoOrchestrator:
                 if latest_ai:
                     continue
             latest_user = self._merge_human_messages_for_memory(human_messages)
-            self.memory.add_round(
-                tid,
-                user=latest_user,
-                assistant=latest_ai,
-                llm=self.llm,
-            )
-            self.memory.maybe_run_silent_turn_compaction(
-                thread_id=tid,
-                llm=self.llm,
-                context_soft_limit_tokens=self.settings.memory_context_soft_limit_tokens,
-                context_max_tokens=self.settings.memory_context_max_tokens,
-                silent_turn_cooldown_rounds=self.settings.memory_silent_turn_cooldown_rounds,
-                query_hint=latest_user,
-                runtime_context_tokens=runtime_context_tokens,
-            )
-            self.memory.reflect_on_turn(
-                thread_id=tid,
-                user=latest_user,
-                assistant=latest_ai,
-                tool_observations=list(reversed(tool_observations)),
-                llm=self.llm,
-            )
+            if not latest_user.strip() and not latest_ai.strip():
+                return {}
+
+            reversed_tool_observations = list(reversed(tool_observations))
+
+            def run_memory_postprocess() -> None:
+                self.memory.add_round(
+                    tid,
+                    user=latest_user,
+                    assistant=latest_ai,
+                    llm=self.llm,
+                )
+                self.memory.maybe_run_silent_turn_compaction(
+                    thread_id=tid,
+                    llm=self.llm,
+                    context_soft_limit_tokens=self.settings.memory_context_soft_limit_tokens,
+                    context_max_tokens=self.settings.memory_context_max_tokens,
+                    silent_turn_cooldown_rounds=self.settings.memory_silent_turn_cooldown_rounds,
+                    query_hint=latest_user,
+                    runtime_context_tokens=runtime_context_tokens,
+                )
+                self.memory.reflect_on_turn(
+                    thread_id=tid,
+                    user=latest_user,
+                    assistant=latest_ai,
+                    tool_observations=reversed_tool_observations,
+                    llm=self.llm,
+                )
+
+            self.memory_postprocess.enqueue(thread_id=tid, fn=run_memory_postprocess)
             return {}
 
         builder = StateGraph(FalcoState)
@@ -314,6 +346,8 @@ class FalcoOrchestrator:
         return builder.compile(checkpointer=InMemorySaver())
 
     def invoke(self, user_input: str, thread_id: str = "default") -> str:
+        self.memory_postprocess.flush_thread(thread_id)
+        self._refresh_mcp_runtime_if_needed()
         self._thread_id_ctx.set(thread_id)
         self._latest_user_ctx.set(user_input)
         self._resume_input_ctx.set("")
@@ -321,7 +355,7 @@ class FalcoOrchestrator:
         self._working_directory_ctx.set(working_directory)
         config = {
             "configurable": {"thread_id": thread_id},
-            "recursion_limit": max(6, self.settings.max_tool_steps * 2 + 4),
+            "recursion_limit": max(12, self.settings.max_tool_steps * 3 + 8),
         }
         state: FalcoState = {
             "messages": [HumanMessage(content=user_input)],
@@ -344,13 +378,15 @@ class FalcoOrchestrator:
         return ""
 
     def resume(self, user_input: str, thread_id: str = "default") -> str:
+        self.memory_postprocess.flush_thread(thread_id)
+        self._refresh_mcp_runtime_if_needed()
         self._thread_id_ctx.set(thread_id)
         self._latest_user_ctx.set(user_input)
         self._resume_input_ctx.set(user_input)
         self._working_directory_ctx.set(self._restore_thread_working_directory(thread_id))
         config = {
             "configurable": {"thread_id": thread_id},
-            "recursion_limit": max(6, self.settings.max_tool_steps * 2 + 4),
+            "recursion_limit": max(12, self.settings.max_tool_steps * 3 + 8),
         }
         result = self.graph.invoke(Command(resume=user_input), config=config)
         if isinstance(result, dict) and result.get("working_directory"):
@@ -455,7 +491,8 @@ class FalcoOrchestrator:
                     thread_id=thread_id,
                 ),
                 skills=self.skills,
-                rag=self.rag,
+                settings=self.settings,
+                llm=self.llm,
             )
         except Exception as exc:  # noqa: BLE001
             result = f"Approval execution failed for {request_id or 'pending_request'}: {exc}"
@@ -501,3 +538,33 @@ class FalcoOrchestrator:
         for item in items[1:]:
             merged.append(f"- {item}")
         return "\n".join(merged).strip()
+
+    def _load_soul_block(self) -> str:
+        soul_path = self.settings.soul_path
+        if soul_path is None or not soul_path.exists() or not soul_path.is_file():
+            return ""
+        try:
+            content = soul_path.read_text(encoding="utf-8").strip()
+        except Exception:
+            return ""
+        if not content:
+            return ""
+        return f"<soul>\n{content}\n</soul>"
+
+    def _refresh_mcp_runtime_if_needed(self) -> None:
+        if self.mcp.reload_if_needed():
+            self.mcp_tools = self.mcp.tools()
+            self.graph = self._build_graph()
+
+    def _reload_mcp_tools_now(self) -> str:
+        self.mcp.reload_if_needed(force=True)
+        self.mcp_tools = self.mcp.tools()
+        self.graph = self._build_graph()
+        return self.mcp.catalog()
+
+    def reload_mcp_tools(self) -> str:
+        return self._reload_mcp_tools_now()
+
+    def mcp_catalog(self) -> str:
+        self._refresh_mcp_runtime_if_needed()
+        return self.mcp.catalog()

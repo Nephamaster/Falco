@@ -21,8 +21,20 @@ You are part of a lead-agent workflow where the lead agent decides whether to de
 </runtime_context>
 """
 
-RAG_QUERY_OPTIMIZATION_PROMPT_TEMPLATE = """Rewrite and expand the user query for local knowledge retrieval.
-Return a main query, sub-queries, and keywords.
+RAG_QUERY_OPTIMIZATION_PROMPT_TEMPLATE = """You optimize a user query for local knowledge retrieval.
+Keep the user intent unchanged while improving recall.
+
+Return:
+- `rewritten_query`: one concise, retrieval-ready main query
+- `sub_queries`: up to a few focused query variants for multi-aspect recall
+- `keywords`: important sparse-retrieval terms such as entities, dates, versions, modules, domains, and exact phrases
+
+Rules:
+- Prefer terms that are likely to appear in documents
+- Preserve important names, versions, dates, and file-oriented terminology
+- Use sub-queries when the question has multiple aspects or alternative phrasings
+- Do not answer the question
+- Do not add fabricated facts
 """
 
 

@@ -22,10 +22,13 @@ def coerce_json_tool_call(message: AIMessage, valid_tool_names: set[str]) -> AIM
             normalized_tool_calls.append(normalized)
         if not changed:
             return message
+        additional_kwargs = dict(message.additional_kwargs or {})
+        additional_kwargs.pop("tool_calls", None)
+        additional_kwargs.pop("function_call", None)
         return AIMessage(
             content=message.content,
             tool_calls=normalized_tool_calls,
-            additional_kwargs=message.additional_kwargs,
+            additional_kwargs=additional_kwargs,
             response_metadata=message.response_metadata,
         )
 
@@ -52,7 +55,7 @@ def coerce_json_tool_call(message: AIMessage, valid_tool_names: set[str]) -> AIM
                 "id": f"manual_tool_{uuid.uuid4().hex[:10]}",
             }
         ],
-        additional_kwargs=message.additional_kwargs,
+        additional_kwargs={key: value for key, value in (message.additional_kwargs or {}).items() if key not in {"tool_calls", "function_call"}},
         response_metadata=message.response_metadata,
     )
 
@@ -142,7 +145,15 @@ def _coerce_args(args: Any) -> Any:
 
 def _normalize_tool_args(name: str, args: Any) -> Any:
     if isinstance(args, dict):
-        return args
+        if name == "use_skill" and "v__args" in args and isinstance(args["v__args"], list):
+            normalized = _normalize_tool_args(name, args["v__args"])
+            if isinstance(normalized, dict):
+                for key, value in args.items():
+                    if key.startswith("v__"):
+                        continue
+                    normalized.setdefault(key, value)
+                return normalized
+        return {key: value for key, value in args.items() if not str(key).startswith("v__")}
     if name == "use_skill" and isinstance(args, list):
         normalized: dict[str, Any] = {}
         if len(args) >= 1:

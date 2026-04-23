@@ -9,8 +9,7 @@ from langchain_core.tools import BaseTool, tool
 from harness.agents.human_loop import HumanLoopManager
 from harness.agents.memory.manager import ConversationMemoryManager
 from harness.agents.subagent_tasks import SubAgentTaskManager
-from harness.rag import MilvusRAG
-from harness.skills.skills import SkillManager
+from harness.skills.skills import SkillExecutionContext, SkillManager
 from harness.tokenization import count_tokens, truncate_tokens
 from harness.workspace import WorkspaceManager
 
@@ -23,40 +22,6 @@ except ModuleNotFoundError:
 
 load_dotenv()
 
-MAX_TOOL_READ_TOKENS = 100_000
-MAX_TOOL_WRITE_TOKENS = 200_000
-MAX_SEARCH_FILE_BYTES = 1_000_000
-MAX_SEARCH_FILES = 800
-MAX_LIST_ITEMS = 300
-
-BLOCKED_PATH_PARTS = {
-    ".git",
-    ".hg",
-    ".svn",
-    ".falco",
-    "__pycache__",
-    "node_modules",
-    ".next",
-    ".venv",
-    "venv",
-}
-
-BLOCKED_FILE_NAMES = {
-    ".env",
-    ".env.local",
-    ".env.production",
-    ".env.development",
-    "id_rsa",
-    "id_ed25519",
-}
-
-BLOCKED_FILE_SUFFIXES = {
-    ".pem",
-    ".key",
-    ".p12",
-    ".pfx",
-}
-
 
 def _resolve_path(
     workspace: WorkspaceManager,
@@ -68,7 +33,7 @@ def _resolve_path(
     return workspace.resolve_thread_path(thread_id, raw_path, cwd=cwd)
 
 
-def _is_blocked_path(path: Path, workspace: WorkspaceManager) -> bool:
+def _is_blocked_path(path: Path, workspace: WorkspaceManager, settings) -> bool:
     if not workspace.is_allowed_path(path):
         return True
 
@@ -84,23 +49,26 @@ def _is_blocked_path(path: Path, workspace: WorkspaceManager) -> bool:
         return True
 
     parts = set(rel.parts)
-    if parts & BLOCKED_PATH_PARTS:
+    blocked_path_parts = set(getattr(settings, "blocked_path_parts", ()) or ())
+    if parts & blocked_path_parts:
         return True
-    if path.name in BLOCKED_FILE_NAMES:
+    blocked_file_names = set(getattr(settings, "blocked_file_names", ()) or ())
+    if path.name in blocked_file_names:
         return True
-    return path.suffix.lower() in BLOCKED_FILE_SUFFIXES
+    blocked_suffixes = {str(item).lower() for item in (getattr(settings, "blocked_file_suffixes", ()) or ())}
+    return path.suffix.lower() in blocked_suffixes
 
 
-def _ensure_tool_path_allowed(path: Path, workspace: WorkspaceManager, *, write: bool = False) -> None:
-    if _is_blocked_path(path, workspace):
+def _ensure_tool_path_allowed(path: Path, workspace: WorkspaceManager, settings, *, write: bool = False) -> None:
+    if _is_blocked_path(path, workspace, settings):
         action = "write" if write else "access"
         rel = workspace.describe_path(path)
         raise ValueError(f"Refusing to {action} sensitive or generated path: {rel}")
 
 
-def _iter_search_files(root: Path, workspace: WorkspaceManager) -> list[Path]:
+def _iter_search_files(root: Path, workspace: WorkspaceManager, settings) -> list[Path]:
     if root.is_file():
-        return [root] if not _is_blocked_path(root, workspace) else []
+        return [root] if not _is_blocked_path(root, workspace, settings) else []
 
     files: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root):
@@ -108,20 +76,21 @@ def _iter_search_files(root: Path, workspace: WorkspaceManager) -> list[Path]:
         dirnames[:] = [
             name
             for name in dirnames
-            if not _is_blocked_path(current / name, workspace)
+            if not _is_blocked_path(current / name, workspace, settings)
         ]
         for name in filenames:
             file_path = current / name
-            if _is_blocked_path(file_path, workspace):
+            if _is_blocked_path(file_path, workspace, settings):
                 continue
             files.append(file_path)
-            if len(files) >= MAX_SEARCH_FILES:
+            if len(files) >= settings.tool_search_max_files:
                 return files
     return files
 
 
 def _execute_write_file_impl(
     workspace: WorkspaceManager,
+    settings,
     path: str,
     content: str,
     *,
@@ -129,11 +98,11 @@ def _execute_write_file_impl(
     thread_id: str,
 ) -> str:
     target = _resolve_path(workspace, thread_id, path, cwd=cwd)
-    _ensure_tool_path_allowed(target, workspace, write=True)
+    _ensure_tool_path_allowed(target, workspace, settings, write=True)
     normalized_content = _normalize_text_content(content)
     content_tokens = count_tokens(normalized_content)
-    if content_tokens > MAX_TOOL_WRITE_TOKENS:
-        return f"Refusing to write more than {MAX_TOOL_WRITE_TOKENS} tokens in one tool call."
+    if content_tokens > settings.tool_write_max_tokens:
+        return f"Refusing to write more than {settings.tool_write_max_tokens} tokens in one tool call."
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(normalized_content, encoding="utf-8")
     return f"Wrote {content_tokens} tokens to {target}"
@@ -183,8 +152,9 @@ def _execute_skill_manage_impl(
 
 def _execute_skill_action_impl(
     skills: SkillManager,
-    rag: MilvusRAG | None,
     workspace: WorkspaceManager,
+    settings,
+    llm,
     *,
     thread_id: str,
     cwd: Path | None = None,
@@ -192,39 +162,18 @@ def _execute_skill_action_impl(
     action: str,
     args: dict,
 ) -> str:
-    skill = skills.get(skill_name)
-    if skill is None or not skill.enabled:
-        return f"Skill is not available or not enabled: {skill_name}"
-
-    normalized_skill = skill.name.strip().lower()
-    normalized_action = action.strip().lower()
-    if normalized_skill == "rag":
-        if rag is None:
-            return "RAG skill is disabled."
-        if normalized_action == "search":
-            query = str(args.get("query", "")).strip()
-            top_k = int(args.get("top_k", 5))
-            if not query:
-                return "RAG search requires args.query."
-            try:
-                result = rag.search(query, top_k=top_k)
-                return result.render()
-            except Exception as exc:  # noqa: BLE001
-                return f"RAG skill search failed: {exc}"
-        if normalized_action == "index":
-            path = str(args.get("path", "knowledge"))
-            drop_old = bool(args.get("drop_old", False))
-            target = _resolve_path(workspace, thread_id, path, cwd=cwd)
-            _ensure_tool_path_allowed(target, workspace)
-            if not target.exists():
-                return f"Path does not exist: {path}"
-            try:
-                return rag.index_paths([target], drop_old=drop_old)
-            except Exception as exc:  # noqa: BLE001
-                return f"RAG skill index failed: {exc}"
-        return "RAG skill supports actions: search, index."
-
-    return f"Skill action is not executable: {skill_name}.{action}"
+    return skills.execute(
+        skill_name=skill_name,
+        action=action,
+        args=args,
+        context=SkillExecutionContext(
+            settings=settings,
+            llm=llm,
+            workspace=workspace,
+            thread_id=thread_id,
+            working_directory=cwd,
+        ),
+    )
 
 
 def execute_pending_approval(
@@ -235,7 +184,8 @@ def execute_pending_approval(
     workspace: WorkspaceManager,
     current_working_directory: Path | None,
     skills: SkillManager,
-    rag: MilvusRAG | None,
+    settings,
+    llm,
 ) -> str:
     item = human_loop.get_pending(thread_id, request_id)
     if not item:
@@ -248,6 +198,7 @@ def execute_pending_approval(
     if action == "write_file":
         result = _execute_write_file_impl(
             workspace,
+            settings,
             path=payload.get("path", ""),
             content=payload.get("content", ""),
             cwd=current_working_directory,
@@ -256,6 +207,7 @@ def execute_pending_approval(
     elif action == "write_final_file":
         result = _execute_write_file_impl(
             workspace,
+            settings,
             path=payload.get("path", ""),
             content=payload.get("content", ""),
             cwd=current_working_directory,
@@ -266,8 +218,9 @@ def execute_pending_approval(
     elif action == "use_skill":
         result = _execute_skill_action_impl(
             skills,
-            rag,
             workspace,
+            settings,
+            llm,
             thread_id=thread_id,
             cwd=current_working_directory,
             skill_name=payload.get("skill_name", ""),
@@ -287,7 +240,8 @@ def create_core_tools(
     memory: ConversationMemoryManager,
     human_loop: HumanLoopManager,
     skills: SkillManager,
-    rag: MilvusRAG | None,
+    settings,
+    llm,
     thread_id_getter,
     latest_user_getter,
     working_directory_getter,
@@ -295,6 +249,7 @@ def create_core_tools(
     working_directory_persistor=None,
     resume_input_getter=None,
     mcp_catalog_getter=None,
+    mcp_reload_getter=None,
     subagent_task_manager: SubAgentTaskManager | None = None,
     subagent_task_runner=None,
     max_subagents: int = 4,
@@ -346,7 +301,14 @@ def create_core_tools(
         return bool(resume_input and any(word in resume_input for word in approval_words))
 
     def _execute_write_file(path: str, content: str) -> str:
-        return _execute_write_file_impl(workspace, path, content, cwd=_current_working_directory(), thread_id=_current_thread_id())
+        return _execute_write_file_impl(
+            workspace,
+            settings,
+            path,
+            content,
+            cwd=_current_working_directory(),
+            thread_id=_current_thread_id(),
+        )
 
     def _execute_skill_manage(
         *,
@@ -368,8 +330,9 @@ def create_core_tools(
     def _execute_skill_action(skill_name: str, action: str, args: dict) -> str:
         return _execute_skill_action_impl(
             skills,
-            rag,
             workspace,
+            settings,
+            llm,
             thread_id=_current_thread_id(),
             cwd=_current_working_directory(),
             skill_name=skill_name,
@@ -381,19 +344,19 @@ def create_core_tools(
     def list_files(path: str = ".") -> str:
         """List files and directories under a workspace-relative path."""
         target = _resolve_path(workspace, _current_thread_id(), path, cwd=_current_working_directory())
-        _ensure_tool_path_allowed(target, workspace)
+        _ensure_tool_path_allowed(target, workspace, settings)
         if not target.exists():
             return f"Path does not exist: {path}"
         if target.is_file():
             return str(target)
         rows = []
         for item in sorted(target.iterdir(), key=lambda p: p.name.lower()):
-            if _is_blocked_path(item, workspace):
+            if _is_blocked_path(item, workspace, settings):
                 continue
             kind = "DIR" if item.is_dir() else "FILE"
             rows.append(f"{kind}\t{item}")
-            if len(rows) >= MAX_LIST_ITEMS:
-                rows.append(f"... truncated after {MAX_LIST_ITEMS} items")
+            if len(rows) >= settings.tool_list_max_items:
+                rows.append(f"... truncated after {settings.tool_list_max_items} items")
                 break
         return "\n".join(rows) if rows else "(empty)"
 
@@ -401,10 +364,10 @@ def create_core_tools(
     def read_file(path: str, max_tokens: int = 6000) -> str:
         """Read a text file from workspace. Use workspace-relative path."""
         target = _resolve_path(workspace, _current_thread_id(), path, cwd=_current_working_directory())
-        _ensure_tool_path_allowed(target, workspace)
+        _ensure_tool_path_allowed(target, workspace, settings)
         if not target.exists() or not target.is_file():
             return f"File not found: {path}"
-        limit = max(1, min(int(max_tokens), MAX_TOOL_READ_TOKENS))
+        limit = max(1, min(int(max_tokens), settings.tool_read_max_tokens))
         with target.open("r", encoding="utf-8") as handle:
             content = handle.read()
         return truncate_tokens(content, limit)
@@ -413,10 +376,10 @@ def create_core_tools(
     def write_file(path: str, content: str, approved_request_id: str = "") -> str:
         """Request approval to write a text file. Use approve_pending_action to execute after user approval."""
         target = _resolve_path(workspace, _current_thread_id(), path, cwd=_current_working_directory())
-        _ensure_tool_path_allowed(target, workspace, write=True)
+        _ensure_tool_path_allowed(target, workspace, settings, write=True)
         content_tokens = count_tokens(content)
-        if content_tokens > MAX_TOOL_WRITE_TOKENS:
-            return f"Refusing to write more than {MAX_TOOL_WRITE_TOKENS} tokens in one tool call."
+        if content_tokens > settings.tool_write_max_tokens:
+            return f"Refusing to write more than {settings.tool_write_max_tokens} tokens in one tool call."
         if approved_request_id:
             if not _latest_user_approves(approved_request_id):
                 return (
@@ -446,10 +409,10 @@ def create_core_tools(
         """Request approval to write a final user-facing file into the thread deliverables directory."""
         deliverable_path = _deliverable_alias(path)
         target = _resolve_path(workspace, _current_thread_id(), deliverable_path, cwd=_current_working_directory())
-        _ensure_tool_path_allowed(target, workspace, write=True)
+        _ensure_tool_path_allowed(target, workspace, settings, write=True)
         content_tokens = count_tokens(content)
-        if content_tokens > MAX_TOOL_WRITE_TOKENS:
-            return f"Refusing to write more than {MAX_TOOL_WRITE_TOKENS} tokens in one tool call."
+        if content_tokens > settings.tool_write_max_tokens:
+            return f"Refusing to write more than {settings.tool_write_max_tokens} tokens in one tool call."
         if approved_request_id:
             if not _latest_user_approves(approved_request_id):
                 return (
@@ -464,6 +427,7 @@ def create_core_tools(
                 return "Approved request payload does not match this write_final_file call."
             result = _execute_write_file_impl(
                 workspace,
+                settings,
                 deliverable_path,
                 content,
                 cwd=_current_working_directory(),
@@ -484,15 +448,15 @@ def create_core_tools(
     def search_in_files(pattern: str, path: str = ".") -> str:
         """Regex search in text files under workspace-relative path."""
         target = _resolve_path(workspace, _current_thread_id(), path, cwd=_current_working_directory())
-        _ensure_tool_path_allowed(target, workspace)
+        _ensure_tool_path_allowed(target, workspace, settings)
         if not target.exists():
             return f"Path does not exist: {path}"
         regex = re.compile(pattern, re.IGNORECASE)
-        files = _iter_search_files(target, workspace)
+        files = _iter_search_files(target, workspace, settings)
         hits: list[str] = []
         for file_path in files:
             try:
-                if file_path.stat().st_size > MAX_SEARCH_FILE_BYTES:
+                if file_path.stat().st_size > settings.tool_search_file_max_bytes:
                     continue
                 for index, line in enumerate(file_path.read_text(encoding="utf-8").splitlines(), start=1):
                     if regex.search(line):
@@ -690,7 +654,8 @@ def create_core_tools(
             workspace=workspace,
             current_working_directory=_current_working_directory(),
             skills=skills,
-            rag=rag,
+            settings=settings,
+            llm=llm,
         )
 
     @tool
@@ -699,10 +664,23 @@ def create_core_tools(
         action: str,
         args: dict | None = None,
         approved_request_id: str = "",
+        **extra,
     ) -> str:
         """Use an enabled skill action. RAG is available as use_skill(skill_name='rag', action='search'|'index', args={...})."""
+        if extra.get("v__args") and isinstance(extra["v__args"], list):
+            packed = list(extra["v__args"])
+            if not skill_name and len(packed) >= 1:
+                skill_name = str(packed[0])
+            if not action and len(packed) >= 2:
+                action = str(packed[1])
+            if args is None and len(packed) >= 3 and isinstance(packed[2], dict):
+                args = packed[2]
+            if not approved_request_id and len(packed) >= 4:
+                approved_request_id = str(packed[3] or "")
         final_args = args or {}
-        if skill_name.strip().lower() == "rag" and action.strip().lower() == "index":
+        normalized_skill = skill_name.strip().lower()
+        normalized_action = action.strip().lower()
+        if normalized_skill == "rag" and normalized_action in {"index", "refresh_source", "remove_source"}:
             payload = {"skill_name": skill_name, "action": action, "args": final_args}
             if approved_request_id:
                 if not _latest_user_approves(approved_request_id):
@@ -735,6 +713,13 @@ def create_core_tools(
             return "MCP registry is not configured."
         return mcp_catalog_getter()
 
+    @tool
+    def reload_mcp_tools() -> str:
+        """Reload MCP server tools from the current JSON configuration and show the resulting catalog."""
+        if mcp_reload_getter is None:
+            return "MCP registry is not configured."
+        return mcp_reload_getter()
+
     tools: list[BaseTool] = [
         list_files,
         read_file,
@@ -755,6 +740,7 @@ def create_core_tools(
         approve_pending_action,
         use_skill,
         mcp_catalog,
+        reload_mcp_tools,
     ]
 
     if include_delegate and subagent_task_manager is not None and subagent_task_runner is not None:
@@ -875,6 +861,7 @@ def create_core_tools(
 def create_subagent_tools(
     *,
     workspace: WorkspaceManager,
+    settings,
     thread_id: str,
     worker_root: Path,
 ) -> list[BaseTool]:
@@ -892,19 +879,19 @@ def create_subagent_tools(
     def list_files(path: str = ".") -> str:
         """List files and directories visible to the worker. Relative paths use the worker directory."""
         target = _resolve_worker_path(path)
-        _ensure_tool_path_allowed(target, workspace)
+        _ensure_tool_path_allowed(target, workspace, settings)
         if not target.exists():
             return f"Path does not exist: {path}"
         if target.is_file():
             return str(target)
         rows = []
         for item in sorted(target.iterdir(), key=lambda p: p.name.lower()):
-            if _is_blocked_path(item, workspace):
+            if _is_blocked_path(item, workspace, settings):
                 continue
             kind = "DIR" if item.is_dir() else "FILE"
             rows.append(f"{kind}\t{item}")
-            if len(rows) >= MAX_LIST_ITEMS:
-                rows.append(f"... truncated after {MAX_LIST_ITEMS} items")
+            if len(rows) >= settings.tool_list_max_items:
+                rows.append(f"... truncated after {settings.tool_list_max_items} items")
                 break
         return "\n".join(rows) if rows else "(empty)"
 
@@ -912,25 +899,25 @@ def create_subagent_tools(
     def read_file(path: str, max_tokens: int = 6000) -> str:
         """Read a text file accessible to the worker."""
         target = _resolve_worker_path(path)
-        _ensure_tool_path_allowed(target, workspace)
+        _ensure_tool_path_allowed(target, workspace, settings)
         if not target.exists() or not target.is_file():
             return f"File not found: {path}"
-        limit = max(1, min(int(max_tokens), MAX_TOOL_READ_TOKENS))
+        limit = max(1, min(int(max_tokens), settings.tool_read_max_tokens))
         return truncate_tokens(target.read_text(encoding="utf-8"), limit)
 
     @tool
     def search_in_files(pattern: str, path: str = ".") -> str:
         """Regex search in files accessible to the worker."""
         target = _resolve_worker_path(path)
-        _ensure_tool_path_allowed(target, workspace)
+        _ensure_tool_path_allowed(target, workspace, settings)
         if not target.exists():
             return f"Path does not exist: {path}"
         regex = re.compile(pattern, re.IGNORECASE)
-        files = _iter_search_files(target, workspace)
+        files = _iter_search_files(target, workspace, settings)
         hits: list[str] = []
         for file_path in files:
             try:
-                if file_path.stat().st_size > MAX_SEARCH_FILE_BYTES:
+                if file_path.stat().st_size > settings.tool_search_file_max_bytes:
                     continue
                 for index, line in enumerate(file_path.read_text(encoding="utf-8").splitlines(), start=1):
                     if regex.search(line):
@@ -958,11 +945,11 @@ def create_subagent_tools(
         _ensure_within_worker_root(target)
         if target.name in {"task.md", "status.json"}:
             return f"Refusing to overwrite reserved worker file: {target.name}"
-        _ensure_tool_path_allowed(target, workspace, write=True)
+        _ensure_tool_path_allowed(target, workspace, settings, write=True)
         normalized_content = _normalize_text_content(content)
         content_tokens = count_tokens(normalized_content)
-        if content_tokens > MAX_TOOL_WRITE_TOKENS:
-            return f"Refusing to write more than {MAX_TOOL_WRITE_TOKENS} tokens in one tool call."
+        if content_tokens > settings.tool_write_max_tokens:
+            return f"Refusing to write more than {settings.tool_write_max_tokens} tokens in one tool call."
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(normalized_content, encoding="utf-8")
         return f"Wrote {content_tokens} tokens to {target}"

@@ -4,6 +4,72 @@ export type ChatStreamCallbacks = {
   onDone?: (answer: string) => void;
 };
 
+type ApiBaseParam = {
+  apiBase: string;
+};
+
+export type HealthResponse = {
+  status: string;
+  service: string;
+};
+
+export type MCPCatalogResponse = {
+  result: string;
+};
+
+export type RAGSearchResponse = {
+  result: string;
+};
+
+export type RAGIndexResponse = {
+  message: string;
+};
+
+function buildEndpoint(apiBase: string, path: string) {
+  return `${apiBase.replace(/\/$/, "")}${path}`;
+}
+
+async function parseJson<T>(response: Response): Promise<T> {
+  if (!response.ok) {
+    throw new Error(`Request failed: ${response.status}`);
+  }
+  return (await response.json()) as T;
+}
+
+export async function fetchHealth({ apiBase }: ApiBaseParam) {
+  const response = await fetch(buildEndpoint(apiBase, "/api/v1/health"), {
+    method: "GET",
+    cache: "no-store",
+  });
+  return parseJson<HealthResponse>(response);
+}
+
+export async function fetchMCPCatalog({ apiBase }: ApiBaseParam) {
+  const response = await fetch(buildEndpoint(apiBase, "/api/v1/mcp/catalog"), {
+    method: "GET",
+    cache: "no-store",
+  });
+  return parseJson<MCPCatalogResponse>(response);
+}
+
+export async function searchRAG(params: { apiBase: string; query: string; topK: number }) {
+  const response = await fetch(buildEndpoint(params.apiBase, "/api/v1/rag/search"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query: params.query, top_k: params.topK }),
+  });
+  return parseJson<RAGSearchResponse>(response);
+}
+
+export async function indexRAG(params: { apiBase: string; path: string; dropOld: boolean }) {
+  const response = await fetch(buildEndpoint(params.apiBase, "/api/v1/rag/index"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path: params.path, drop_old: params.dropOld }),
+  });
+  return parseJson<RAGIndexResponse>(response);
+}
+
 export async function streamChat(params: {
   apiBase: string;
   threadId: string;
@@ -11,7 +77,7 @@ export async function streamChat(params: {
   callbacks: ChatStreamCallbacks;
 }) {
   const { apiBase, threadId, message, callbacks } = params;
-  const endpoint = `${apiBase.replace(/\/$/, "")}/api/v1/chat/stream`;
+  const endpoint = buildEndpoint(apiBase, "/api/v1/chat/stream");
   const response = await fetch(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

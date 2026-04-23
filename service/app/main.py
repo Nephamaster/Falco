@@ -27,12 +27,23 @@ app = FastAPI(title="Falco Service", version="0.1.0")
 def _cors_origins() -> list[str]:
     orchestrator = runtime.get_orchestrator()
     origins = [item.strip() for item in orchestrator.settings.cors_origins if item.strip()]
-    return origins or ["http://127.0.0.1:1357"]
+    return origins
+
+
+def _cors_origin_regex() -> str | None:
+    orchestrator = runtime.get_orchestrator()
+    regexes = [item.strip() for item in orchestrator.settings.cors_origin_regexes if item.strip()]
+    if not regexes:
+        return None
+    if len(regexes) == 1:
+        return regexes[0]
+    return "|".join(f"(?:{pattern})" for pattern in regexes)
 
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins(),
+    allow_origin_regex=_cors_origin_regex(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

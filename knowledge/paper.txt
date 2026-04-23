@@ -1,0 +1,448 @@
+\section{Introduction}
+\label{sec:introduction}
+
+\IEEEPARstart{I}{nstruction} tuning (IT) has become the cornerstone for aligning Large Language Models (LLMs) with human intent \cite{Wang_2023_aligning, Aw_2024_instructiontuning, Ren_2024_learning, Wu_2024_language}. Recent findings suggest that the quality and diversity of instruction data often outweigh sheer quantity, enabling models trained on small-scale datasets to match or exceed the performance of those trained on massive corpora \cite{Zhou_2023neurips_LIMA,Chen_2023_Maybe,Liu_2024ICLR_What,ultra,wizard}. Consequently, selecting a diverse and representative subset from large data pools has emerged as a critical research direction \cite{Bukharin_2024EMNLP_data, Wang_2025ICLRWorkshop_diversity}.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.46\textwidth]{figures/figure1-scs.pdf}
+    \caption{Comparison between geometric sparsity metrics with SCS. 
+    The left panel illustrates how geometric metrics favor sparse outliers, erroneously assigning high scores to noise, specifically including intrinsic noise (e.g., the syntax error ``She don't like apples.'') and extrinsic distributional noise (e.g., text is of high surface quality but misaligned with the target distribution). The right panel demonstrates the SCS framework, which utilizes semantic clustering (shaded areas) and generation probability. SCS effectively penalizes outliers, assigning higher importance (darker colors) to samples that contribute to the semantic cohesion of their respective clusters. }
+    \label{fig:comparison}
+\end{figure}
+
+However, a fundamental challenge remains: precisely defining and measuring ``data diversity'' in a way that correlates with downstream model performance. Early approaches relied on lexical metrics (e.g., Type-Token Ratio~\cite{Richards_1987_type}) or simple embedding distances~\cite{Du_2019ACL-P_boosting, Stasaski_2020ACL_diverse, Lai_2020LREC_diversity, Stasaski_2022NAACL_semantic, Pasarkar_2024aPMLR_Cousins}, which often fail to capture the semantic nuances of complex instructions. Recently, systematic analyzes~\cite{Yang_2025ACL_measuring} have shifted the field towards embedding-based geometric methods, such as~\textit{NovelSum}, which utilize high-dimensional spatial features to estimate information density.
+
+Despite these advancements, we argue that the prevailing paradigm suffers from a more fundamental issue: \textit{the absence of a principled definition of what constitutes desirable diversity in the context of instruction tuning}. Most existing metrics implicitly adopt a geometric assumption that spatial isolation in the embedding space equates to informational value. Under this assumption, the more scattered a dataset's points are, the more ``diverse'' it is deemed. Yet this conflation of geometric sparsity with semantic richness leads to a critical failure mode that we term the \textbf{Anomaly--Diversity Conflation}: outliers residing in sparse embedding regions receive disproportionately high diversity scores, regardless of whether they represent genuine semantic enrichment or mere data noise. As illustrated in Figure~\ref{fig:comparison} (left), these anomalies manifest in two distinct forms: (1)~\textit{intrinsic noise}, low-quality text such as the grammatically broken sentence ``\textit{She don't like apples.}'', which occupies a sparse region due to its abnormal linguistic patterns; and (2)~\textit{extrinsic distributional noise}, text that is well-formed on the surface but semantically misaligned with the target instruction distribution (eg., a medical sample falling within the domain of mathematics), appearing as isolated geometric outliers. Under existing metrics, both types of anomalies are erroneously rewarded with high diversity scores, leading to the selection of subsets that are \textit{mathematically sparse but semantically degraded}.
+
+To address this, we first formalize the concept of \textbf{Effective Diversity}, which considers only semantically coherent and high-quality semantic categories as valid diversity contributions, excluding anomalous samples that inflate geometric sparsity without providing learnable semantic content (see formal definition in Section~\ref{subsec:effective_diversity}). Guided by this principle, we propose the \textbf{Semantic Cohesion State (SCS)}, a novel metric that operationalizes effective diversity through a dual-view, three-stage framework. SCS models the dataset's semantic structure via clustering and evaluates each sample from two complementary perspectives: (1)~an \textit{intrinsic view} that utilizes generation likelihood to filter out low-quality noise; and (2)~an \textit{extrinsic view} that assesses spatial cohesion to penalize distributional outliers that artificially inflate traditional diversity metrics. As shown in Figure~\ref{fig:comparison} (right), SCS effectively assigns higher importance to samples that contribute to genuine semantic cohesion while suppressing both forms of anomalies.
+
+Extensive experiments on instruction tuning benchmarks demonstrate that SCS achieves \textbf{state-of-the-art} correlations with downstream performance (0.968 on Llama-3.1, 0.985 on Qwen3). Ablation studies confirm that integrating spatial weighting with generation probability is essential for filtering intrinsic low-quality samples and extrinsic distributional noise. Furthermore, SCS consistently outperforms the latest baselines in both stability and computational speed, validating the necessity of jointly modeling semantic cohesion and probabilistic likelihood. Our main contributions are summarized as follows:
+\begin{enumerate}
+    \item We identify the limitations of embedding-based geometric sparsity metrics, specifically their susceptibility to low-quality noise and outliers, and formalize the concept of \textbf{effective diversity} to provide a principled foundation for diversity measurement in instruction tuning.
+    \item We propose the \textbf{Semantic Cohesion State (SCS)} metric, which integrates generation probability and cluster-centric distance weighting to robustly measure diversity and mitigate outlier interference.
+    \item Empirical results show that SCS achieves near-perfect correlations (0.985 and 0.968) with model performance on the instruction tuning of Qwen3 and Llama-3.1, respectively, surpassing existing baselines.
+    \item Beyond correlation, our comprehensive evaluations reveal two critical advantages of SCS: (1) Computational Efficiency: SCS is over 9× faster than state-of-the-art geometric metrics like NovelSum; (2) Scaling Behavior: SCS exhibits a logarithmic growth pattern that naturally captures semantic saturation as dataset size increases.
+\end{enumerate}
+
+\section{Related Work}
+\label{sec:related_work}
+
+\subsection{Instruction Tuning Data Selection}
+\label{subsec:it_data_selection}
+
+Instruction tuning is pivotal for aligning Large Language Models (LLMs) with human intent \cite{Wang_2023_aligning,Ren_2024_learning,Wu_2024_language}. A growing consensus suggests that fine-tuning efficacy relies less on sheer data volume and more on the quality and representativeness of the instruction set \cite{Zhou_2023neurips_LIMA,Chen_2023_Maybe,Liu_2024ICLR_What,ultra,wizard}. Consequently, research has pivoted toward advanced data selection strategies \cite{Bukharin_2024EMNLP_data,Qin_2025TMLR_unleashing}.
+
+Prevalent approaches can be broadly categorized along two dimensions. \textbf{Coverage-oriented methods} employ coreset selection (e.g., K-Center-Greedy; \cite{kcenter}) or clustering algorithms (e.g., K-means; \cite{kmeans}) to maximize the spatial coverage of selected subsets. \textbf{Quality-oriented methods} prioritize sample quality through model-based scoring: Repr Filter \cite{Liu_2024ICLR_What} ranks samples by complexity and quality before greedy filtering, while LIMA \cite{Zhou_2023neurips_LIMA} demonstrates that carefully curated small-scale data can produce strong alignment. A few recent methods attempt to address both dimensions jointly, for instance, Clustering and Ranking \cite{Ge_2024EMNLP_clustering} combines clustering-based coverage with expert-aligned quality ranking, and MoDS \cite{du2023mods} selects data based on quality, coverage, and model necessity.
+
+Crucially, all of the above are \emph{data selection algorithms}: procedures for constructing training subsets. They do not provide a standalone metric for evaluating the diversity state of an arbitrary given dataset. Our work addresses a complementary problem, \emph{how to measure} the effective diversity of a dataset, which in turn can serve as a diagnostic tool for evaluating and comparing any selection strategy without re-training.
+
+\subsection{Metrics for Dataset Diversity}
+\label{subsec:diversity_metrics}
+
+Robust diversity metrics are fundamental to data engineering. Traditional \textbf{lexical metrics} such as Type-Token Ratio (TTR; \cite{Richards_1987_type}) and vocd-D \cite{vocdd} measure surface-level vocabulary richness but fail to capture the semantic nuances of instruction datasets.
+
+With the rise of representation learning, \textbf{embedding-based geometric metrics} have become standard. Distance-based measures including DistSum and KNN-Distance \cite{Lai_2020LREC_diversity,Stasaski_2022NAACL_semantic,Du_2019ACL-P_boosting,sement} quantify how spread out samples are in the embedding space. Distribution-based metrics such as Partition Entropy \cite{farquhar2024detecting} and Facility Location \cite{fl} assess how uniformly data points are distributed. Additional measures include Vendi Score \cite{Pasarkar_2024aPMLR_Cousins}, Radius \cite{Lai_2020LREC_diversity}, Log Determinant Distance \cite{Wang_2025ICLRWorkshop_diversity}, and Cluster Inertia \cite{Du_2019ACL-P_boosting}. Despite their utility, all of these metrics share the same foundational assumption: \emph{greater geometric sparsity implies greater diversity}. As discussed in Section~\ref{sec:introduction}, this assumption leads to the anomaly--diversity conflation, where noise samples in sparse regions inflate diversity scores.
+
+Most recently, \cite{Yang_2025ACL_measuring} introduced \textbf{NovelSum}, a density-aware metric that integrates inter-sample differences with local information density. NovelSum represents the current state-of-the-art, achieving a 0.97 correlation with downstream performance. However, it still operates within the geometric paradigm and does not incorporate any quality signal, leaving it vulnerable to the same outlier sensitivity.
+
+\paragraph{Positioning of SCS}
+SCS departs from the purely geometric paradigm by operationalizing the concept of \emph{effective diversity} (see Definition~\ref{def:effective_diversity} in Section~\ref{subsec:effective_diversity}). Through its dual-view framework, combining intrinsic generation probability with extrinsic cluster-centric spatial weighting, SCS computes the entropy of a quality-weighted semantic cluster distribution. This design enables it to disentangle genuine semantic breadth from noise-inflated sparsity while providing a single, interpretable, dataset-level score. Unlike selection algorithms that require re-execution for each subset, SCS can evaluate any given dataset efficiently and is agnostic to the method by which the dataset was constructed.
+
+\begin{figure*}[th]
+    \centering
+    \includegraphics[width=0.92\textwidth]{figures/figure2-scs.pdf}
+    \caption{Overview of the Semantic Cohesion State (SCS) framework. Given an instruction dataset, SCS proceeds in three stages: (1) Semantic Clustering via HDBSCAN to discover intent categories; (2) Semantic Cohesion State Modeling, which computes each sample's intrinsic generation probability $p(x_i)$ and extrinsic spatial weight $w^{\text{dist}}_i$, yielding a unified cohesion weight $\hat{w}_i$; and (3) Entropy-based Diversity quantification over the quality-weighted cluster distribution.}
+    \label{fig:fig2}
+\end{figure*}
+
+
+\section{Methodology}
+\label{sec:methodology}
+
+In this section, we formally define the Semantic Cohesion State (SCS) metric. We first introduce the concept of effective diversity that underpins SCS, then describe its three-stage computation: Semantic Clustering, Semantic Cohesion State Modeling, and Entropy-based Diversity quantification. As illustrated in Figure~\ref{fig:fig2}, SCS operationalizes effective diversity into a computable, dataset-level score.
+
+
+\subsection{Effective Diversity}
+\label{subsec:effective_diversity}
+
+As discussed in Section~\ref{sec:introduction}, existing metrics conflate geometric sparsity with semantic richness. To provide a principled foundation for diversity measurement, we formalize the following concept:
+
+\textbf{Effective Diversity}
+\label{def:effective_diversity}
+Given an instruction tuning dataset $\mathcal{D} = \{x_1, x_2, \dots, x_N\}$, its \emph{effective diversity} is defined as the breadth of distinct, semantically coherent, and learnable intent categories covered by $\mathcal{D}$, where each category consists of samples that are both intrinsically well-formed (high generation likelihood) and extrinsically aligned with the dataset's semantic structure (proximity to cluster centroids). Formally, effective diversity measures the entropy of a quality-weighted semantic cluster distribution, excluding contributions from anomalous samples that inflate geometric sparsity without providing learnable semantic content.
+
+This definition departs from the geometric paradigm in three critical ways:
+
+\begin{itemize}
+    \item \textbf{Task-aligned rather than geometry-aligned.} Effective diversity does not equate all differences with diversity. Instead, it counts only those semantic distinctions that are \emph{learnable and beneficial} for instruction tuning. Just as a clinical trial values a diverse patient cohort but excludes ineligible participants, effective diversity values broad semantic coverage while filtering out samples that would degrade model alignment.
+
+    \item \textbf{Quality-aware by design.} A sample that is isolated in the embedding space may be isolated because it is genuinely novel or because it is noisy, ill-formed, or out-of-distribution. Effective diversity distinguishes these two cases by incorporating an intrinsic quality signal (generation likelihood), ensuring that high diversity scores reflect genuine semantic breadth rather than distributional artifacts.
+
+    \item \textbf{Structure-preserving.} Rare but coherent samples are \emph{not} penalized under effective diversity. A semantically unique instruction that forms its own coherent cluster (even a small one) contributes positively to the diversity score. Only samples that are \emph{simultaneously} isolated and low in quality, the dual-signal criterion, are down-weighted.
+\end{itemize}
+
+% The following subsections describe how SCS operationalizes this definition into a computable metric through semantic clustering, dual-view cohesion modeling, and entropy-based aggregation.
+
+
+% In this section, we formally define the Semantic Cohesion State (SCS) metric, which operationalizes the concept of effective diversity (Definition~\ref{def:effective_diversity}) into a computable, dataset-level score. Our primary objective is to quantify the diversity of a given dataset $\mathcal{D} = \{x_1, x_2, \dots, x_N\}$ while mitigating outlier interference by computing the entropy of its cohesion-weighted semantic probability distribution, where $N$ denotes the number of samples.
+
+% The key insight behind SCS is that effective diversity cannot be captured by geometric distances alone, it requires jointly modeling \emph{what} the data covers (semantic structure) and \emph{how reliably} each sample contributes to that coverage (quality-weighted cohesion). As illustrated in Figure~\ref{fig:fig2}, the computation of SCS proceeds in three stages: (1) \textbf{Semantic Clustering}, which discovers the intent categories underlying the dataset; (2) \textbf{Semantic Cohesion State Modeling}, which evaluates each sample's contribution through a dual-view mechanism; and (3) \textbf{Entropy-based Diversity} quantification, which aggregates these contributions into a single scalar score.
+
+\subsection{Semantic Clustering}
+\label{subsec:clustering}
+
+To capture the underlying semantic structure of the dataset, we first project each sample $x_i$ into a high-dimensional embedding space using a large language model (LLM):
+\begin{equation}
+    \mathbf{e}_i = E_{\text{LLM}} (x_i)
+    \label{eq:embedding}
+\end{equation}
+where $\mathbf{e}_i$ represents the embedding vector for sample $x_i$, and $E_{\text{LLM}}$ denotes the embedding function of the LLM. Subsequently, to identify semantic structures without assuming a fixed number of categories, we employ \textit{HDBSCAN} (Hierarchical Density-Based Spatial Clustering of Applications with Noise)~\cite{Ester_1996AAAI_density} to partition $\mathcal{D}$ into $K$ disjoint clusters $\{C_1, C_2, \dots, C_K\}$. This density-based approach allows the metric to adaptively recognize semantic modes of varying granularity across different datasets, without requiring a pre-specified cluster count.
+
+The resulting clusters serve as proxies for distinct intent categories within the instruction dataset. Effective diversity, as defined in Definition~\ref{def:effective_diversity}, is then measured over this discovered category structure rather than over raw geometric distances between individual samples.
+
+\subsection{Semantic Cohesion State Modeling}
+\label{subsec:cohesion_modeling}
+
+Acknowledging that samples contribute unequally to the semantics of their respective clusters (e.g., intrinsic noise (low-quality texts) and extrinsic distributional noise often deviate from the dominant cluster semantics), we define this varying degree of influence as~\textit{semantic cohesion}. To measure this characteristic, we model samples from both~\textbf{intrinsic} and~\textbf{extrinsic} perspectives, assessing the text's intrinsic generation probability and its spatial weighting relative to the cluster center.
+
+\subsubsection{Intrinsic Generation Probability}
+\label{subsubsec:intrinsic}
+
+The intrinsic view addresses a key source of noise: low-quality text (e.g., containing grammatical errors, broken syntax, or garbled content) that occupies unique positions in the embedding space due to perturbations, creating spurious ``diversity.'' Since such samples should not count toward effective diversity, we use the generation probability estimated by an LLM to approximate each sample's intrinsic quality. For a sample $x_i$ from cluster $C_k$, its intrinsic generation probability $p(x_i)$ is:
+\begin{equation}
+    p(x_i) = P_{\text{LLM}}(x_i)
+    \label{eq:probability}
+\end{equation}
+where $P_{\text{LLM}}$ computes the generation likelihood of the instruction instance $x_i$. Here, $p(x_i) \in (0,1)$ serves as a proxy for the semantic occurrence probability of $x_i$ in real-world scenarios. Samples with low generation likelihood---indicative of ill-formed or incoherent text---are naturally down-weighted in the subsequent diversity computation.
+
+\subsubsection{Spatial Weighting Mechanism}
+\label{subsubsec:spatial}
+
+The extrinsic view addresses a second source of noise: samples that are linguistically well-formed but reside at the periphery of their assigned cluster, suggesting weak semantic alignment with the cluster's core intent. Within a semantic cluster, samples located near the centroid embody the core semantics, whereas peripheral samples (including extrinsic distributional noise) exhibit weaker cohesion. To penalize such outliers and emphasize core semantics, we employ a cluster-centric spatial weighting mechanism.
+
+First, we calculate the centroid $\mathbf{e}_0$ of cluster $C_k$ by averaging the embeddings of all constituent samples: $\mathbf{e}_0 = \frac{1}{|C_k|} \sum_{x_j \in C_k} \mathbf{e}_j$. Then, we apply a Gaussian-kernel based function to assign weights, ensuring a smooth decay for distant samples. The normalized spatial weight $w^{\text{dist}}_i$ for sample $x_i$ is:
+\begin{equation}
+    w^{\text{dist}}_i = \frac{e^{-\|\mathbf{e}_i - \mathbf{e}_0\|_2}}{\sum_{x_j \in C_k} e^{-\|\mathbf{e}_j - \mathbf{e}_0\|_2}} \times |C_k|
+    \label{eq:spatial}
+\end{equation}
+where $|C_k|$ is the number of samples in the cluster. The softmax-like term normalizes relative importance within the cluster, while the multiplication by $|C_k|$ rescales weights such that the average sample weight approximates 1. This prevents weight magnitude from diminishing in large clusters, maintaining numerical stability when combined with generation probabilities.
+
+Importantly, this spatial weighting mechanism does \emph{not} penalize all distant samples indiscriminately. A genuinely rare but high-quality instruction that forms its own coherent cluster will have a high spatial weight within that cluster (being close to its own centroid). Only samples that are peripheral \emph{within} an existing cluster, suggesting weak alignment with that cluster's intent, receive reduced weights.
+
+\subsubsection{Sample Semantic Cohesion Weight}
+\label{subsubsec:unified}
+
+By synthesizing the intrinsic and extrinsic perspectives, we define the unified sample semantic cohesion weight $\hat{w}_i$, representing the effective contribution of sample $x_i$ to the dataset's diversity:
+\begin{equation}
+    \hat{w}_i = p(x_i) \times w^{\text{dist}}_i
+    \label{eq:unified}
+\end{equation}
+
+This multiplicative formulation implements the \textbf{dual-signal criterion} central to effective diversity: a sample must score well on \emph{both} intrinsic quality (generation likelihood) \emph{and} extrinsic alignment (spatial cohesion) to contribute substantially to the diversity score. Samples that fail on either dimension, low-quality text that happens to cluster well, or high-quality text that is semantically misaligned, are naturally suppressed. Unlike prior methods that treat all samples equally within a cluster, this formulation captures the nuanced contributions of each sample based on both its likelihood of occurrence and its semantic representativeness.
+
+\subsection{Entropy-based Diversity}
+\label{subsec:entropy}
+
+Finally, we aggregate the sample-level cohesion weights to derive a cluster-level probability distribution, then quantify diversity via Shannon entropy.
+
+The effective weight of cluster $C_k$ is the sum of the unified weights of its constituent samples:
+\begin{equation}
+    S_{C_k} = \sum_{x_i \in C_k} \hat{w}_i
+    \label{eq:cluster_weight}
+\end{equation}
+
+We normalize these cluster weights to form a global probability distribution $P = \{p_1, p_2, \dots, p_K\}$, where $p_k$ represents the quality-weighted probability mass of the $k$-th semantic category:
+\begin{equation}
+    P_{C_k} = \frac{S_{C_k}}{\sum_{j=1}^K S_{C_j}}
+    \label{eq:distribution}
+\end{equation}
+
+The effective diversity of the dataset $\mathcal{D}$ is then quantified using Shannon Entropy over this distribution:
+\begin{equation}
+    \mathbf{E}_{\mathcal{D}} = - \sum_{k=1}^K P_{C_k} \log P_{C_k}
+    \label{eq:entropy}
+\end{equation}
+
+Here, $\mathbf{E}_{\mathcal{D}}$ denotes the final SCS score. A higher entropy value indicates a more balanced and diverse semantic cohesion state, the dataset covers many distinct intent categories with relatively even quality-weighted representation. Conversely, a low SCS score signals either poor semantic coverage (few effective clusters) or severe imbalance (probability mass concentrated in a few dominant categories), both of which are undesirable for instruction tuning.
+
+This entropy-based formulation directly connects to our definition of effective diversity: by computing entropy over a \emph{quality-weighted} cluster distribution rather than a raw geometric distribution, SCS measures the breadth of \emph{learnable, coherent} intent categories while inherently discounting contributions from noisy or misaligned samples.
+
+\section{Experiments}
+\label{sec:experiment}
+
+\subsection{Experimental Setup}
+\label{subsec:setup}
+
+\paragraph{Data Source and Sampling Strategies.}
+To ensure a fair and rigorous comparison, we align our experimental setting with prior research~\cite{Yang_2025ACL_measuring}. We follow~\cite{Liu_2024ICLR_What} to utilize the combined data pool $\mathcal{X}^{all}$ (comprising ShareGPT~\cite{share}, UltraChat~\cite{ultra}, and WizardLM~\cite{wizard}) as the instruction tuning source. To ensure the stability and effectiveness of the data selection process, we first performed a data cleaning step to remove low-quality or anomalous samples from the original data source. The removed samples primarily include non-English texts, numerically dominated texts, and texts shorter than 256 tokens. Consistent with the findings reported in \cite{Yang_2025ACL_measuring} and our empirical observations, such samples constitute major sources of noise that adversely affect the quality of data selection.
+
+From the cleaned pool, we construct instruction datasets of varying diversity levels using four representative sampling strategies: \textbf{Random} Selection, \textbf{K-Center}-Greedy~\cite{kcenter}, \textbf{K-means} Sampling~\cite{kmeans}, and \textbf{Repr} Filter~\cite{Liu_2024ICLR_What}. Specifically, K-means partitions samples into a predefined number of clusters and uniformly samples data from each cluster; K-Center-Greedy iteratively selects the most informative samples via a greedy algorithm to form a coreset; Repr Filter first ranks the data pool in descending order according to complexity and quality scores, and then greedily filters samples based on distances in the embedding space; Random randomly samples data from $\mathcal{X}^{all}$ without considering any additional criteria and serves as a baseline.
+
+For all methods, the size of the selected dataset is fixed to 10K samples. Each selection strategy is repeated three times, with each run followed by independent tuning and evaluation, in order to assess the robustness and stability of the diversity metrics. This yields a total of 12 independent data points (4 strategies $\times$ 3 runs) for correlation analysis.
+
+\begin{table}[t]
+\small
+\centering
+\setlength{\tabcolsep}{10pt} 
+\renewcommand{\arraystretch}{1.1}
+\caption{Statistics of the instruction tuning data sources constituting the combined pool $\mathcal{X}^{all}$.}
+\begin{tabular}{lr}
+    \toprule
+    \textbf{Dataset Source} & \textbf{Sample Count} \\
+    \midrule
+    UltraChat               & 207,865               \\
+    ShareGPT                & 48,540                \\
+    WizardLM                & 143,000               \\
+    \midrule
+    \textbf{Total}          & \textbf{399,405}      \\
+    \bottomrule
+\end{tabular}
+\label{tab:data_statistics}
+\end{table}
+
+\paragraph{Evaluation Metrics}
+\begin{itemize}
+    \item \textbf{Model Performance:} Fine-tuned models are evaluated using \textit{MT-Bench}~\cite{mtbench} and \textit{AlpacaEval}~\cite{alpaca}, which target multi-turn conversation and instruction-following capabilities, respectively. The final performance score is reported as the average of the normalized results of these two benchmarks. 
+    \item  \textbf{Correlation:} To assess the reliability of diversity metrics in predicting downstream task performance, we quantify the correlation between metric scores and model performance. Specifically, we report the arithmetic mean of the Pearson and Spearman correlation coefficients to provide a robust evaluation of comparative effectiveness. 
+    \item  \textbf{Stability:} We utilize the standard deviation ($std$) of the metric scores across several independent runs to measure the stability and robustness of the diversity assessment against random initialization.
+\end{itemize}
+
+\input{sections/table_main_result}
+
+\subsection{Implementation Details}
+\label{subsec:implementation}
+
+\paragraph{Backbone Models and Training}
+We employed Llama-3.1-8B\footnote{\url{https://huggingface.co/meta-llama/Llama-3.1-8B}} (Llama-3.1)~\cite{Dubey_2024_llama} and Qwen3-8B-Base\footnote{\url{https://huggingface.co/Qwen/Qwen3-8B-Base}} (Qwen3)~\cite{Yang_2025_Qwen3} as backbone models. All instruction tuning runs share an identical and fixed set of hyperparameters: the LoRA rank is set to 32, the learning rate is 5e-5, and the batch size is 32. Each training run takes approximately 10 hours with 10 epochs on two NVIDIA RTX A100 GPUs (40GB memory).
+
+\paragraph{Evaluation Judge}
+Model performance was evaluated on MT-Bench and AlpacaEval using GPT-5.2\footnote{\url{https://api.openai.com/v1/responses}} as the judge to ensure robust alignment assessment. Both benchmarks rely on strong large language models as judges to score model-generated responses, enabling a strict and strongly human-aligned assessment of model outputs. A complete evaluation cycle, including response generation and judge scoring, takes approximately 1.5 hours per run.
+
+\paragraph{SCS Calculation}
+The calculation of SCS follows a strictly homologous configuration, where the embedding and probability estimation models align with the instruction tuning backbone. The computation consists of three components: 
+
+\begin{itemize}
+\item \textbf{Embedding Extraction:} Following \cite{Yang_2025ACL_measuring}, we truncate each sample to 256 tokens and extract the hidden state sequence from the final layer of the backbone model, then apply mean pooling over the hidden states corresponding to non-padding tokens to derive a fixed-length embedding representation. This strategy effectively captures the overall semantic content of the text while mitigating biases introduced by variations in text length. 
+\item \textbf{Clustering:} We apply UMAP for dimensionality reduction followed by HDBSCAN (\texttt{min\_cluster\_size}=$30$) to identify semantic structures without enforcing a fixed cluster count. The choice of \texttt{min\_cluster\_size}=$30$ is motivated by extensive empirical analysis presented in Section~\ref{subsec:cluster_size}. 
+\item \textbf{Probability Estimation:} Each text is processed by the backbone model in an auto-regressive manner to obtain the conditional generation probability. To avoid length bias in longer instructions, we calculate the intrinsic generation probability using the \textit{geometric mean} of token-level conditional probabilities~\cite{farquhar2024detecting} rather than the simple product, ensuring a more length-invariant and balanced contribution across samples.
+\end{itemize}
+
+To ensure semantic consistency throughout the computation pipeline, both the extraction of text embeddings and the estimation of generative probabilities are performed using the same backbone model (Llama-3.1 or Qwen3). For any data selection method or diversity metric that relies on semantic embeddings, we consistently use the same model, thereby preserving alignment within the model's semantic space and ensuring reproducibility across all experimental procedures.
+
+
+\subsection{Baselines}
+\label{subsec:baselines}
+
+We compare SCS against a comprehensive suite of existing diversity metrics: 
+\begin{itemize}
+\item \textbf{Lexical Metrics:} Type-Token Ratio (TTR)~\cite{Richards_1987_type} and vocd-D~\cite{vocdd}, which measure diversity based on vocabulary richness but ignore semantic meaning. 
+\item \textbf{Distance-based Metrics:} DistSum (sum of pairwise distances) and KNN-Distance (average distance to nearest neighbors)~\cite{Stasaski_2020ACL_diverse,Stasaski_2022NAACL_semantic}, Cluster Inertia~\cite{Du_2019ACL-P_boosting}, Vendi Score~\cite{Pasarkar_2024aPMLR_Cousins}, Radius~\cite{Lai_2020LREC_diversity}, and Log Determinant Distance~\cite{Wang_2025ICLRWorkshop_diversity}. These evaluate diversity in terms of geometric dispersion in the embedding space. 
+\item \textbf{Distribution-based Metrics:} Partition Entropy~\cite{sement} and Facility Location~\cite{fl}, which measure how uniformly data points are distributed within a semantic space. 
+\item \textbf{NovelSum:} The state-of-the-art data diversity method, a recent metric that combines inter-sample distance with local information density~\cite{Yang_2025ACL_measuring}.
+\end{itemize}
+
+\subsection{Main Results}
+\label{subsec:main_results}
+
+Table~\ref{tab:main_results} presents the main experimental results. SCS not only achieves the strongest correlation with model performance but also demonstrates exceptional stability across varying training scenarios. We highlight the following key findings:
+
+\paragraph{SCS vs.\ State-of-the-Art (NovelSum)}
+Relative to the state-of-the-art NovelSum, which relies solely on density-aware geometric distance, SCS achieves superior correlations (0.968 on Llama-3.1 and 0.985 on Qwen3) and enhanced stability. This validates the core premise of effective diversity: by incorporating quality-aware cohesion signals rather than relying purely on geometric novelty, SCS effectively filters out anomalous outliers that maximize geometric distance but impair model alignment.
+
+\paragraph{SCS vs.\ Distribution-based Metrics}
+Unlike distribution-based metrics such as Facility Location and Semantic Entropy, which prioritize spatial coverage but suffer from extreme instability (e.g., Facility Location drops to 0.077 on Qwen3), SCS maintains robust performance on all datasets. This confirms that jointly modeling intrinsic generation probability and cluster-centric spatial weighting prevents the inflation of diversity scores by noise samples that merely maximize coverage range.
+
+\paragraph{SCS vs.\ Lexical Metrics}
+Against standard lexical metrics like TTR and Vocd-D, which depend on surface-level statistics, SCS achieves a consistent positive correlation, whereas these baselines exhibit negative correlations (approx.\ $-0.2$). This distinction validates that operating in the semantic latent space is crucial to bypass surface-level noise and capture the deep structural diversity of intents.
+
+\paragraph{SCS vs.\ Distance-based Metrics}
+In sharp contrast to distance-based baselines (e.g., DistSumL2) that are highly sensitive to geometric outliers ($std \approx 1.937$), SCS reduces the score variance by orders of magnitude ($std \approx 0.008$). By rigorously penalizing geometric outliers, which constitute the primary source of score volatility in distance-based metrics, SCS effectively smooths stochastic fluctuations, confirming the stability advantage of our entropy-based, quality-weighted formulation.
+
+%%%%%%%%%%%%%%%%%%%% Ablation Studies %%%%%%%%%%%%%%%%%%%%%
+
+\subsection{Ablation Studies}
+\label{subsec:ablation}
+
+\subsubsection{Effectiveness of SCS Components}
+\label{subsubsec:components}
+
+To validate whether the dual-view mechanism, spatial weighting and intrinsic generation probability, effectively filter noise samples, we conducted ablation studies on both Llama-3.1 and Qwen3. As shown in Table~\ref{tab:components_study}, the full SCS demonstrates the strongest correlation with model performance, confirming that the overall design of SCS effectively quantifies effective diversity.
+
+Removing the spatial weighting mechanism causes correlations to drop significantly to 0.834 and 0.802. This decline occurs because embedding-based clustering, even when combined with generation probability, fails to prevent interference from peripheral edge points within clusters, demonstrating that the spatial weighting mechanism effectively eliminates extrinsic distributional noise within the semantic space. Conversely, excluding the probability module results in a further decline to 0.781 and 0.755, indicating that without text quality filtering, diversity estimation is compromised by intrinsic noise. These results underscore the necessity of the dual-signal criterion: both views are essential, and neither alone is sufficient.
+
+
+\begin{table}[t]
+\centering
+\small
+\renewcommand{\arraystretch}{1.1}
+\setlength{\tabcolsep}{10pt}
+\caption{Ablation study on SCS components. Correlation coefficients between metric scores and model performance are reported. ``w/o spatial weighting'' and ``w/o probability'' denote the exclusion of the extrinsic spatial weighting mechanism and intrinsic generation probability modules, respectively.}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Settings} & \textbf{Qwen3} & \textbf{Llama-3.1} \\ 
+\midrule
+\textbf{SCS (Full)} & \textbf{0.985} & \textbf{0.968} \\
+\quad - w/o spatial weighting   & 0.834        & 0.802          \\
+\quad - w/o probability         & 0.781        & 0.755          \\ 
+\bottomrule
+\end{tabular}
+\label{tab:components_study}
+\end{table}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.46\textwidth]{figures/figure3-scs.pdf}
+    \caption{Analysis of SCS metric scaling with respect to dataset size ($N$). The black line represents the theoretical maximum entropy $\log(N)$. SCS plateaus beyond $N \approx 6{,}000$, indicating semantic saturation.}
+    \label{fig:dataset_size_analysis}
+\end{figure}
+
+
+\begin{table}[t]
+\centering
+\small
+\renewcommand{\arraystretch}{1.1}
+\setlength{\tabcolsep}{15pt}
+\caption{Impact of the backbone model used for SCS calculation on the correlation with downstream performance. The ``homologous advantage'' is evident: the highest correlation occurs when the SCS backbone matches the target tuning model.}
+\begin{tabular}{lcc}
+\toprule
+\multirow{2}{*}{\textbf{SCS Backbone}} & \multicolumn{2}{c}{\textbf{Model Performance}} \\ 
+\cmidrule(lr){2-3}
+            & Qwen3 & Llama-3.1 \\ 
+\midrule
+Qwen3       & \textbf{0.985} & 0.874 \\
+Llama-3.1   & 0.882 & \textbf{0.968} \\
+BERT-base   & 0.854 & 0.795 \\ 
+\bottomrule
+\end{tabular}
+\label{tab:backbone_perf}
+\end{table}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.46\textwidth]{figures/figure4-scs.pdf}
+    \caption{Sensitivity analysis of SCS across dataset mixing ratios. The x-axis represents the mixing ratio of three data sources (from Balanced 1:1:1 to Single 1:0:0). LLM-based backbones (Blue and Orange) show a consistent monotonic decrease as data becomes more homogeneous, while BERT-base (Green) fails to capture the diversity drop at the extreme tail.}
+    \label{fig:backbone_sensitivity}
+\end{figure}
+
+\subsubsection{Effect of Dataset Size}
+\label{subsubsec:dataset_size}
+
+To understand how SCS scales with data volume, we analyzed its behavior as the total number of samples increases from 100 to 20,000. We utilized both Llama-3.1 and Qwen3 as backbone models and employed K-means as the data selection strategy, setting the clustering parameters to $k=20$ and $k=50$, respectively.
+
+As illustrated in Figure~\ref{fig:dataset_size_analysis}, SCS exhibits a characteristic logarithmic growth pattern that aligns with the theoretical properties of entropy. Initially, all SCS values rise sharply as new semantic categories are introduced. However, as $N$ exceeds 6,000, the growth rate significantly diminishes and the curve begins to plateau. Crucially, the SCS trajectory diverges from the pure $\log(N)$ baseline (black line), which represents the theoretical maximum entropy where every sample is unique. This divergence indicates that SCS effectively captures \textit{information saturation} and \textit{semantic redundancy} inherent in datasets, implying that simply adding more samples yields diminishing returns in effective diversity. Furthermore, the trends remain highly consistent across different backbone models and clustering parameters ($k=20$ vs.\ $k=50$), demonstrating the robustness of our metric against hyperparameter variations.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.46\textwidth]{figures/figure5-scs.pdf}
+    \caption{Impact of minimum cluster size ($M_{min}$) on SCS performance. \textbf{Solid lines} (left axis) represent the correlation with downstream tasks, peaking at $M_{min}=30$. \textbf{Dashed lines} (right axis) denote the robustness metric (lower variance indicates higher stability), achieving optimal stability around the same threshold.}
+    \label{fig:cluster_size_analysis}
+\end{figure}
+
+\begin{table}[t]
+\small
+\centering
+\renewcommand{\arraystretch}{1.1}
+\setlength{\tabcolsep}{15pt}
+\caption{Computational efficiency analysis. The runtime is measured on a subset of 500 samples using the same CPU platform. SCS is $9.1\times$ faster than NovelSum while achieving higher correlation.}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Method} & \textbf{Runtime (s)} & \textbf{Ratio ($\times$)} \\
+\midrule
+Vendi-Score    & 0.06   & 1.00    \\
+DistSum-cosine & 0.12   & 1.94    \\
+Sem-Ent        & 6.29   & 105.39  \\
+SCS            & 20.54  & 344.35  \\
+NovelSum       & 187.64 & 3146.36 \\
+\bottomrule
+\end{tabular}
+\label{tab:runtime_analysis}
+\end{table}
+
+\subsubsection{Impact of Backbone Models}
+\label{subsubsec:backbone}
+
+Since SCS uses an LLM for both embedding extraction and probability estimation, we evaluate backbone effectiveness through a dual-perspective analysis of reliability and sensitivity.
+
+\paragraph{Reliability (Correlation with Performance)}
+We assessed whether the backbone choice affects the metric's alignment with downstream model performance. Table~\ref{tab:backbone_perf} reports the correlation between SCS variants and the tuning results on Llama-3.1 and Qwen3 targets. We observe a clear ``homologous advantage,'' where the highest correlation occurs when the metric backbone matches the target model (0.985 for Qwen3-on-Qwen3, 0.968 for Llama-on-Llama). However, even in cross-model settings, LLM-based backbones (Qwen3/Llama-3.1) consistently outperform BERT-base (avg.\ $0.930$ vs.\ $0.925$ vs.\ $0.825$). This confirms that LLMs serve as superior proxies for instruction semantics, likely due to their stronger alignment with human intent compared to smaller encoder models.
+
+\paragraph{Sensitivity to Distribution Shifts}
+To verify metric robustness, we simulated distribution shifts by mixing UltraChat, ShareGPT, and WizardLM in ratios ranging from Balanced (1:1:1) to Single-Source (1:0:0). As shown in Figure~\ref{fig:backbone_sensitivity}, LLM-based backbones (Qwen3/Llama-3.1) exhibit a consistent \textit{monotonic decline} as the data becomes homogeneous, perfectly aligning with expected entropy behavior. In contrast, the BERT-based metric fluctuates counter-intuitively, showing an anomalous increase at the single-source extreme. This confirms that LLMs possess superior resolution in distinguishing semantic redundancy compared to BERT.
+
+
+\subsubsection{Impact of Minimum Cluster Size}
+\label{subsec:cluster_size}
+
+Since SCS employs HDBSCAN for unsupervised semantic discovery, the \textit{minimum cluster size} parameter ($M_{min}$) is critical for determining the granularity of semantic partitions. Figure~\ref{fig:cluster_size_analysis} illustrates the impact of $M_{min}$ on performance, evaluated on a fixed dataset of 10,000 samples. This visualization reveals a distinct trade-off between semantic resolution and noise robustness, characterized by two opposing trends:
+
+\begin{itemize}
+    \item \textbf{Correlation Trend (Solid Lines):} Both Qwen3 and Llama-3.1 exhibit a pronounced inverted-U trajectory. The correlation with downstream performance improves sharply as $M_{min}$ increases from 5 to 20, peaks decisively at $M_{min}=30$ (reaching 0.958 and 0.976, respectively), and subsequently deteriorates as the cluster size expands further. 
+    \item \textbf{Robustness Trend (Dashed Lines):} The robustness metric (measured as estimation standard deviation, where lower is better) follows a corresponding U-shaped curve. The standard deviation is initially high at small cluster sizes due to instability but drops to its nadir at $M_{min} \approx 30 \sim 50$, indicating the most stable estimation state.
+\end{itemize}
+
+This evidence suggests that small cluster sizes ($M_{min} < 15$) lead to over-segmentation, where local noise is misidentified as distinct semantic modes. Conversely, excessively large sizes ($M_{min} > 50$) result in under-segmentation, merging distinct intents into coarse clusters and diluting semantic precision. Consequently, we identify $M_{min}=30$ as the optimal equilibrium point that maximizes correlation while minimizing variance, and adopt it as the default configuration.
+
+
+\begin{table*}[t]
+\centering
+\renewcommand{\arraystretch}{1.0}
+\setlength{\tabcolsep}{8pt}
+\small
+\caption{Case study comparing NovelSum and SCS scores on three representative samples. SCS correctly down-weights outliers (A) and low-quality text (B), while rewarding high-quality near-centroid samples (C).}
+\begin{tabular}{l p{11cm} c c}
+    \toprule
+    \textbf{Case} & \textbf{Sample Content} & \textbf{NovelSum} & \textbf{SCS} \\
+    \midrule
+    A: Outlier & 
+    The area of a circle with radius 4 is ? know area = $\pi r$, so plug in $r = 4$: area = $\pi \cdot 4 = 4\pi$. So the answer is 4 pi. & 
+    0.446 & 0.112 \\
+    \midrule
+    B: Low-quality & 
+    A patient go to doctor because chest hurt and food taste strange. Maybe body tired from work and weather change. Hospital question is confusing so answer can be rest more. Medical history not important here. & 
+    0.431 & 0.023 \\
+    \midrule
+    C: Near-centroid & 
+    What is the positive difference between $120\%$ of 30 and $130\%$ of 20? One hundred twenty percent of 30 is $120 \cdot 30 \cdot \frac{1}{100} = 36$, and $130\%$ of 20 is $130 \cdot 20 \cdot \frac{1}{100} = 26$. The difference between 36 and 26 is $\boxed{10}$. & 
+    0.409 & 0.524 \\
+    \bottomrule
+\end{tabular}
+\label{tab-case-study}
+\end{table*}
+
+
+\subsection{Computational Efficiency}
+\label{subsec:efficiency}
+
+We benchmarked the inference latency of various diversity metrics using a randomized subset of $N=500$ samples on a standardized CPU environment. As detailed in Table~\ref{tab:runtime_analysis}, we include Vendi-Score~\cite{Pasarkar_2024aPMLR_Cousins} as a representative lightweight baseline due to its minimal computational cost. Notably, distance-based metrics like DistSum-cosine maintain a highly competitive runtime profile, incurring only a marginal latency increase ($1.94\times$). While SCS incurs a higher computational cost compared to simple geometric metrics, it demonstrates a substantial efficiency advantage over the state-of-the-art NovelSum. Specifically, NovelSum exceeds the baseline execution time by over three orders of magnitude ($>3000\times$), whereas SCS remains within a practical range ($344\times$). These results underscore that SCS achieves an optimal balance, providing superior performance correlations without the prohibitive computational overheads associated with other advanced metrics.
+
+
+\subsection{Case Study}
+\label{subsec:case_study}
+
+To provide an intuitive understanding of how SCS differs from geometric metrics in scoring individual samples, Table~\ref{tab-case-study} presents three representative cases. Case A is a geometric outlier: a math instruction with a computational error (``$\pi \cdot 4 = 4\pi$'' instead of ``$\pi \cdot 4^2 = 16\pi$'') that is spatially isolated in the embedding space. NovelSum assigns it a high score (0.446), treating isolation as novelty; SCS correctly down-weights it (0.112) due to low generation likelihood. Case B is an intrinsic noise sample: a poorly written medical response with broken grammar. Again, NovelSum rewards its geometric uniqueness (0.431), while SCS assigns its lowest score (0.023), recognizing the text's low intrinsic quality. Case C is a well-formed, near-centroid math instruction. NovelSum gives it the lowest score among the three (0.409), penalizing its lack of geometric novelty; in contrast, SCS assigns it the highest score (0.524), correctly identifying it as a high-quality, semantically representative sample.
+
+These cases illustrate the fundamental difference between geometric sparsity and effective diversity: SCS rewards samples that are both \emph{well-formed} and \emph{semantically representative}, rather than those that are merely \emph{spatially isolated}.
+
+
+\section{Conclusion and Limitations}
+\label{sec:conclusion}
+
+\subsection{Conclusion}
+
+In this work, we identified a fundamental gap in the data engineering pipeline for LLM instruction tuning: the lack of a principled definition and reliable measurement of data diversity. Existing geometric metrics implicitly equate spatial isolation with informational value, leading to the systematic conflation of anomalies with diversity. To address this, we formalized the concept of \textbf{effective diversity}, the breadth of distinct, semantically coherent, and learnable intent categories within a dataset, and proposed the \textbf{Semantic Cohesion State (SCS)} as its operational metric.
+
+SCS employs a dual-view framework that unifies intrinsic generation probability and extrinsic cluster-centric spatial weighting within a semantic clustering structure, computing diversity as the entropy of a quality-weighted cluster distribution. Extensive experiments on Llama-3.1 and Qwen3 demonstrate that SCS achieves state-of-the-art correlations with downstream performance (0.968 and 0.985, respectively), while maintaining superior stability and computational efficiency compared to existing baselines. Ablation studies confirm that both views are essential: neither quality filtering nor spatial weighting alone is sufficient to disentangle genuine semantic breadth from noise-inflated sparsity.
+
+\subsection{Limitations and Future Directions}
+
+\paragraph{SCS as a diagnostic metric, not a selection algorithm}
+The most significant limitation of this work is that SCS, in its current form, is a \emph{dataset-level diagnostic metric} rather than a \emph{data selection method}. Given an already-constructed dataset, SCS can efficiently evaluate its effective diversity and compare it against alternatives. However, SCS does not directly prescribe \emph{how} to construct an optimal subset from a large data pool.
+
+This design choice is deliberate: we believe that accurate measurement is a prerequisite for effective optimization. Without a reliable diversity metric, selection algorithms lack a principled objective to optimize against, and practitioners have no way to assess whether a selected subset is actually diverse in a meaningful sense. SCS fills this measurement gap.
+
+That said, bridging from measurement to selection is a natural and important next step. The quality signals computed during SCS evaluation, generation likelihood and spatial cohesion weights, provide per-sample scores that could be directly leveraged for selection (e.g., filtering low-scoring samples, or greedily selecting samples to maximize the resulting SCS). Designing and validating such an SCS-guided selection algorithm, and comparing it against existing methods such as MoDS~\cite{du2023mods} and Clustering and Ranking~\cite{Ge_2024EMNLP_clustering}, is a promising direction for future work.
+
+\paragraph{Backbone dependency}
+SCS relies on the backbone LLM for both embedding extraction and probability estimation. As shown in our ablation studies, employing a weaker backbone (e.g., BERT-base) degrades correlation performance. In specialized domains or low-resource languages where the underlying LLM lacks sufficient pre-training coverage, SCS may underestimate the quality of valid but unfamiliar samples. Future work could explore using stronger reference models or model ensembles to improve robustness in such settings.
+

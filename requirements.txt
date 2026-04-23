@@ -1,6 +1,7 @@
 langchain
 langchain-openai
 langchain-mcp-adapters
+mcp
 langchain-tavily
 langgraph
 langchain-milvus
@@ -11,4 +12,5 @@ tiktoken
 python-dotenv
 pyyaml
 fastapi
+fastapi-mcp
 uvicorn[standard]

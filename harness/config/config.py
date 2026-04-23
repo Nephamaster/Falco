@@ -66,6 +66,14 @@ def _as_dict(value: Any) -> dict[str, Any]:
     return {}
 
 
+def _as_str_list(value: Any, *, default: list[str] | None = None) -> tuple[str, ...]:
+    if value is None:
+        value = default or []
+    if not isinstance(value, list):
+        raise ValueError("expected a list of strings")
+    return tuple(str(item).strip() for item in value if str(item).strip())
+
+
 def _load_yaml(path: Path) -> dict[str, Any]:
     if yaml is None:
         raise RuntimeError("PyYAML is required to load config.yaml. Please install `pyyaml`.")
@@ -103,10 +111,41 @@ class FalcoSettings:
     memory_root: Path
     skills_public_root: Path
     skills_user_roots: tuple[Path, ...]
+    soul_path: Path | None = None
     max_context_messages: int = 12
     max_tool_steps: int = 6
     max_subagents: int = 4
     subagent_max_steps: int = 4
+    tool_read_max_tokens: int = 100_000
+    tool_write_max_tokens: int = 200_000
+    tool_search_file_max_bytes: int = 1_000_000
+    tool_search_max_files: int = 800
+    tool_list_max_items: int = 300
+    blocked_path_parts: tuple[str, ...] = (
+        ".git",
+        ".hg",
+        ".svn",
+        ".falco",
+        "__pycache__",
+        "node_modules",
+        ".next",
+        ".venv",
+        "venv",
+    )
+    blocked_file_names: tuple[str, ...] = (
+        ".env",
+        ".env.local",
+        ".env.production",
+        ".env.development",
+        "id_rsa",
+        "id_ed25519",
+    )
+    blocked_file_suffixes: tuple[str, ...] = (
+        ".pem",
+        ".key",
+        ".p12",
+        ".pfx",
+    )
     memory_recent_rounds: int = 6
     memory_key_rounds: int = 4
     memory_importance_threshold: int = 7
@@ -123,6 +162,8 @@ class FalcoSettings:
     rag_milvus_token: str | None = None
     rag_collection: str = "falco_knowledge"
     rag_embedding_model: str = "text-embedding-3-small"
+    rag_base_url: str = ""
+    rag_api_key: str = ""
     rag_retrieval_mode: str = "dense"
     rag_hybrid_dense_weight: float = 0.7
     rag_hybrid_sparse_weight: float = 0.3
@@ -140,6 +181,7 @@ class FalcoSettings:
     mcp_config_path: Path | None = None
     mcp_tool_prefix: bool = True
     cors_origins: tuple[str, ...] = ("http://127.0.0.1:1357", "http://localhost:1357")
+    cors_origin_regexes: tuple[str, ...] = ()
     config_path: Path | None = None
 
     @classmethod
@@ -152,6 +194,7 @@ class FalcoSettings:
         model_cfg = _as_dict(raw.get("model"))
         workspace_cfg = _as_dict(raw.get("workspace"))
         agent_cfg = _as_dict(raw.get("agent"))
+        controls_cfg = _as_dict(raw.get("controls"))
         memory_cfg = _as_dict(raw.get("memory"))
         rag_cfg = _as_dict(raw.get("rag"))
         mcp_cfg = _as_dict(raw.get("mcp"))
@@ -194,6 +237,8 @@ class FalcoSettings:
             config_dir,
             _as_str(skills_cfg.get("public_root"), default="skills"),
         )
+        soul_path_raw = _as_str(agent_cfg.get("soul_path"), default="").strip()
+        soul_path = _resolve_path(config_dir, soul_path_raw) if soul_path_raw else None
         skills_user_raw = skills_cfg.get("user_roots") or [str(Path(".falco") / "skills")]
         if not isinstance(skills_user_raw, list):
             raise ValueError("`skills.user_roots` must be a list in config.yaml.")
@@ -218,6 +263,9 @@ class FalcoSettings:
         cors_origins_raw = service_cfg.get("cors_origins") or ["http://127.0.0.1:1357", "http://localhost:1357"]
         if not isinstance(cors_origins_raw, list):
             raise ValueError("`service.cors_origins` must be a list in config.yaml.")
+        cors_origin_regexes_raw = service_cfg.get("cors_origin_regexes") or []
+        if not isinstance(cors_origin_regexes_raw, list):
+            raise ValueError("`service.cors_origin_regexes` must be a list in config.yaml.")
 
         settings = cls(
             config_version=config_version,
@@ -234,10 +282,28 @@ class FalcoSettings:
             memory_root=memory_root,
             skills_public_root=skills_public_root,
             skills_user_roots=skills_user_roots,
+            soul_path=soul_path,
             max_context_messages=_as_int(agent_cfg.get("max_context_messages"), default=12),
             max_tool_steps=_as_int(agent_cfg.get("max_tool_steps"), default=6),
             max_subagents=_as_int(agent_cfg.get("max_subagents"), default=4),
             subagent_max_steps=_as_int(agent_cfg.get("subagent_max_steps"), default=4),
+            tool_read_max_tokens=_as_int(controls_cfg.get("tool_read_max_tokens"), default=100_000),
+            tool_write_max_tokens=_as_int(controls_cfg.get("tool_write_max_tokens"), default=200_000),
+            tool_search_file_max_bytes=_as_int(controls_cfg.get("tool_search_file_max_bytes"), default=1_000_000),
+            tool_search_max_files=_as_int(controls_cfg.get("tool_search_max_files"), default=800),
+            tool_list_max_items=_as_int(controls_cfg.get("tool_list_max_items"), default=300),
+            blocked_path_parts=_as_str_list(
+                controls_cfg.get("blocked_path_parts"),
+                default=[".git", ".hg", ".svn", ".falco", "__pycache__", "node_modules", ".next", ".venv", "venv"],
+            ),
+            blocked_file_names=_as_str_list(
+                controls_cfg.get("blocked_file_names"),
+                default=[".env", ".env.local", ".env.production", ".env.development", "id_rsa", "id_ed25519"],
+            ),
+            blocked_file_suffixes=_as_str_list(
+                controls_cfg.get("blocked_file_suffixes"),
+                default=[".pem", ".key", ".p12", ".pfx"],
+            ),
             memory_recent_rounds=_as_int(memory_cfg.get("recent_rounds"), default=10),
             memory_key_rounds=_as_int(memory_cfg.get("key_rounds"), default=10),
             memory_importance_threshold=_as_int(memory_cfg.get("importance_threshold"), default=7),
@@ -260,6 +326,8 @@ class FalcoSettings:
                 rag_cfg.get("embedding_model"),
                 default="text-embedding-3-small",
             ),
+            rag_base_url=_as_str(rag_cfg.get("base_url"), default="") or None,
+            rag_api_key=_as_str(rag_cfg.get("api_key"), default="") or None,
             rag_retrieval_mode=_as_str(rag_cfg.get("retrieval_mode"), default="dense"),
             rag_hybrid_dense_weight=float(rag_cfg.get("hybrid_dense_weight", 0.7)),
             rag_hybrid_sparse_weight=float(rag_cfg.get("hybrid_sparse_weight", 0.3)),
@@ -280,6 +348,7 @@ class FalcoSettings:
             mcp_config_path=mcp_config_path,
             mcp_tool_prefix=_as_bool(mcp_cfg.get("tool_prefix"), default=True),
             cors_origins=tuple(str(item).strip() for item in cors_origins_raw if str(item).strip()),
+            cors_origin_regexes=tuple(str(item).strip() for item in cors_origin_regexes_raw if str(item).strip()),
             config_path=path,
         )
         settings._validate()
@@ -308,11 +377,23 @@ class FalcoSettings:
             raise ValueError("agent.max_subagents must be at least 1.")
         if self.subagent_max_steps < 1:
             raise ValueError("agent.subagent_max_steps must be at least 1.")
+        if self.tool_read_max_tokens < 1:
+            raise ValueError("controls.tool_read_max_tokens must be at least 1.")
+        if self.tool_write_max_tokens < 1:
+            raise ValueError("controls.tool_write_max_tokens must be at least 1.")
+        if self.tool_search_file_max_bytes < 1:
+            raise ValueError("controls.tool_search_file_max_bytes must be at least 1.")
+        if self.tool_search_max_files < 1:
+            raise ValueError("controls.tool_search_max_files must be at least 1.")
+        if self.tool_list_max_items < 1:
+            raise ValueError("controls.tool_list_max_items must be at least 1.")
         if not self.skills_public_root:
             raise ValueError("skills.public_root is required.")
+        if self.soul_path is not None and self.soul_path.suffix.lower() != ".md":
+            raise ValueError("agent.soul_path must point to a .md file.")
         if self.rag_retrieval_mode not in {"dense", "hybrid"}:
             raise ValueError("rag.retrieval_mode must be 'dense' or 'hybrid'.")
         if self.rag_rerank_top_n < self.rag_top_k:
             raise ValueError("rag.rerank_top_n must be greater than or equal to rag.top_k.")
-        if not self.cors_origins:
-            raise ValueError("At least one service.cors_origins entry is required.")
+        if not self.cors_origins and not self.cors_origin_regexes:
+            raise ValueError("At least one service.cors_origins or service.cors_origin_regexes entry is required.")

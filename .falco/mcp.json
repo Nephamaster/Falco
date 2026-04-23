@@ -1,0 +1,32 @@
+{
+  "servers": {
+    "fastapi_stream": {
+      "transport": "streamable_http",
+      "url": "http://127.0.0.1:8001/mcp",
+      "label": "FastAPI Demo",
+      "description": "Local FastAPI MCP server for Falco integration testing.",
+      "tags": ["local", "demo", "fastapi"],
+      "risk_level": "low",
+      "expose_to_agent": true
+    },
+    "fastapi_sse": {
+      "transport": "sse",
+      "url": "http://127.0.0.1:8002/mcp",
+      "label": "FastAPI Demo",
+      "description": "Local FastAPI MCP server for Falco integration testing.",
+      "tags": ["local", "demo", "fastapi"],
+      "risk_level": "low",
+      "expose_to_agent": true
+    },
+    "demo_stdio": {
+      "transport": "stdio",
+      "command": "python",
+      "args": ["-m", "mcps.mcp_stdio"],
+      "label": "STDIO Demo",
+      "description": "Local stdio MCP server for Falco integration testing.",
+      "tags": ["local", "demo", "stdio"],
+      "risk_level": "low",
+      "expose_to_agent": true
+    }
+  }
+}

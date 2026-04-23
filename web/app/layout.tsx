@@ -3,8 +3,8 @@ import type { Metadata } from "next";
 import React from "react";
 
 export const metadata: Metadata = {
-  title: "Falco Assistant",
-  description: "Falco personal assistant web console",
+  title: "Falco Workspace",
+  description: "Falco multi-panel agent workspace for chat, retrieval, indexing, and system diagnostics",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

@@ -21,14 +21,47 @@ workspace:
 
 agent:
   max_context_messages: 12
-  max_tool_steps: 6
+  max_tool_steps: 3
   max_subagents: 4
   subagent_max_steps: 4
+  soul_path: ./soul.md
+
+controls:
+  tool_read_max_tokens: 100000
+  tool_write_max_tokens: 200000
+  tool_search_file_max_bytes: 1000000
+  tool_search_max_files: 800
+  tool_list_max_items: 300
+  blocked_path_parts:
+    - .git
+    - .hg
+    - .svn
+    - .falco
+    - __pycache__
+    - node_modules
+    - .next
+    - .venv
+    - venv
+  blocked_file_names:
+    - .env
+    - .env.local
+    - .env.production
+    - .env.development
+    - id_rsa
+    - id_ed25519
+  blocked_file_suffixes:
+    - .pem
+    - .key
+    - .p12
+    - .pfx
 
 service:
   cors_origins:
     - http://127.0.0.1:1357
     - http://localhost:1357
+    - http://10.108.18.212:1357
+  cors_origin_regexes:
+    - ^http://10\.108\.18\.\d+:1357$
 
 memory:
   root: ./.falco/memory
@@ -51,9 +84,11 @@ skills:
 
 rag:
   enabled: true
-  milvus_uri: ./.falco/milvus/falco_rag.db
+  milvus_uri: /mnt/disk4t/heyuxuan/study/Falco/.falco/milvus/falco_rag.db
   collection: falco_knowledge
-  embedding_model: text-embedding-3-small
+  embedding_model: bge-m3
+  base_url: http://0.0.0.0:1111/v1/
+  api_key: EMPTY
   retrieval_mode: dense
   hybrid_dense_weight: 0.7
   hybrid_sparse_weight: 0.3
@@ -69,6 +104,6 @@ rag:
   index_chunk_overlap: 120
 
 mcp:
-  enabled: false
+  enabled: true
   config_path: ./.falco/mcp.json
   tool_prefix: true

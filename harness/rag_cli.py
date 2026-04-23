@@ -3,9 +3,11 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from harness.config.config import FalcoSettings
-from harness.rag import MilvusRAG
 from langchain_openai import ChatOpenAI
+
+from harness.config.config import FalcoSettings
+from skills.rag.scripts.renderer import render_search_result
+from skills.rag.scripts.service import RAGService
 
 
 def _resolve_workspace_path(root: Path, raw_path: str) -> Path:
@@ -40,7 +42,7 @@ def main() -> None:
         base_url=settings.base_url,
         temperature=0,
     )
-    rag = MilvusRAG(settings=settings, llm=llm)
+    rag = RAGService(settings=settings, llm=llm)
 
     if args.command == "index":
         target = _resolve_workspace_path(Path(settings.workspace_root), args.path)
@@ -49,7 +51,7 @@ def main() -> None:
 
     if args.command == "search":
         result = rag.search(args.query, top_k=args.top_k)
-        print(result.render())
+        print(render_search_result(result))
 
 
 if __name__ == "__main__":
