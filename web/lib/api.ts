@@ -75,14 +75,20 @@ export async function streamChat(params: {
   threadId: string;
   message: string;
   userResponsePreference: string;
+  resume?: boolean;
   callbacks: ChatStreamCallbacks;
 }) {
-  const { apiBase, threadId, message, userResponsePreference, callbacks } = params;
+  const { apiBase, threadId, message, userResponsePreference, resume = false, callbacks } = params;
   const endpoint = buildEndpoint(apiBase, "/api/v1/chat/stream");
   const response = await fetch(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ thread_id: threadId, message, user_response_preference: userResponsePreference }),
+    body: JSON.stringify({
+      thread_id: threadId,
+      message,
+      user_response_preference: userResponsePreference,
+      resume,
+    }),
   });
   if (!response.ok || !response.body) {
     throw new Error(`Request failed: ${response.status}`);

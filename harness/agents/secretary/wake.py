@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextvars import ContextVar
+import json
 from pathlib import Path
 from typing import Literal
 
@@ -19,7 +20,7 @@ from harness.agents.secretary.state import FalcoState
 from harness.agents.thread_session import ThreadSessionManager
 from harness.agents.subagent import SubAgentRunner
 from harness.agents.subagent_tasks import SubAgentTaskManager
-from harness.agents.tool_calling import coerce_json_tool_call
+from harness.agents.tool_calling import coerce_json_tool_call, sanitize_final_answer_text
 from harness.config.config import FalcoSettings
 from harness.mcp import MCPToolRegistry
 from harness.skills.skills import SkillManager
@@ -218,7 +219,7 @@ class FalcoOrchestrator:
                     max_tokens=self.settings.memory_context_max_tokens,
                 ),
                 "soul_block": self._load_soul_block(),
-                "skills_block": self.skills.get_prompt_block(),
+                "skills_block": self.skills.get_prompt_block(exclude_names={"rag"}),
                 "mcp_block": self.mcp.prompt_block(),
                 "workspace_block": self.workspace.prompt_block(thread_id=tid, cwd=working_directory),
                 "working_directory": str(working_directory),
@@ -379,7 +380,7 @@ class FalcoOrchestrator:
             return interrupt_text
         for message in reversed(result["messages"]):
             if isinstance(message, AIMessage) and str(message.content or "").strip():
-                return str(message.content)
+                return sanitize_final_answer_text(message.content)
             if isinstance(message, ToolMessage) and str(message.content or "").strip():
                 return str(message.content)
         return ""
@@ -406,7 +407,7 @@ class FalcoOrchestrator:
             return interrupt_text
         for message in reversed(result["messages"]):
             if isinstance(message, AIMessage) and str(message.content or "").strip():
-                return str(message.content)
+                return sanitize_final_answer_text(message.content)
             if isinstance(message, ToolMessage) and str(message.content or "").strip():
                 return str(message.content)
         return ""
@@ -420,58 +421,44 @@ class FalcoOrchestrator:
         payload = getattr(interrupts[0], "value", interrupts[0])
         if not isinstance(payload, dict):
             return str(payload)
-
-        marker = "HUMAN_APPROVAL_REQUIRED" if payload.get("kind") == "approval" else "HUMAN_INPUT_REQUIRED"
-        lines = [marker]
-        if payload.get("request_id"):
-            lines.append(f"id={payload['request_id']}")
-        if payload.get("clarification_type"):
-            lines.append(f"clarification_type={payload['clarification_type']}")
-        if payload.get("action"):
-            lines.append(f"action={payload['action']}")
-        if payload.get("question"):
-            lines.append(f"question={payload['question']}")
-        if payload.get("rationale"):
-            lines.append(f"rationale={payload['rationale']}")
-        options = payload.get("options") or []
-        if options:
-            lines.append("options=" + " | ".join(str(item) for item in options))
-        lines.append("Stop and wait for user response.")
-        return "\n".join(lines)
+        return json.dumps(payload, ensure_ascii=False)
 
     def _extract_hitl_payload(self, *, thread_id: str, tool_message: str) -> dict | None:
         text = tool_message.strip()
         if not text:
             return None
-        if "HUMAN_INPUT_REQUIRED" not in text and "HUMAN_APPROVAL_REQUIRED" not in text:
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
             return None
-        fields: dict[str, str] = {}
-        for line in text.splitlines():
-            if "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            fields[key.strip()] = value.strip()
-        request_id = fields.get("id", "")
+        if not isinstance(payload, dict):
+            return None
+        kind = str(payload.get("kind", "")).strip().lower()
+        if kind not in {"approval", "clarification"}:
+            return None
+        request_id = str(payload.get("request_id", "")).strip()
         pending = self.human_loop.get_pending(thread_id, request_id) if request_id else None
-        if text.startswith("HUMAN_APPROVAL_REQUIRED"):
+        if kind == "approval":
             return {
                 "kind": "approval",
                 "request_id": request_id,
-                "action": fields.get("action", pending.get("action", "") if pending else ""),
-                "question": fields.get("question", pending.get("question", "") if pending else ""),
-                "rationale": fields.get("rationale", pending.get("rationale", "") if pending else ""),
-                "preview": fields.get("preview", ""),
+                "action": str(payload.get("action", pending.get("action", "") if pending else "")),
+                "question": str(payload.get("question", pending.get("question", "") if pending else "")),
+                "rationale": str(payload.get("rationale", pending.get("rationale", "") if pending else "")),
+                "preview": str(payload.get("preview", "")),
             }
         return {
             "kind": "clarification",
             "request_id": request_id,
-            "question": fields.get("question", pending.get("question", "") if pending else ""),
-            "clarification_type": fields.get(
-                "clarification_type",
-                pending.get("clarification_type", "missing_info") if pending else "missing_info",
+            "question": str(payload.get("question", pending.get("question", "") if pending else "")),
+            "clarification_type": str(
+                payload.get(
+                    "clarification_type",
+                    pending.get("clarification_type", "missing_info") if pending else "missing_info",
+                )
             ),
-            "context": pending.get("context", "") if pending else "",
-            "options": pending.get("options", []) if pending else [],
+            "context": str(payload.get("context", pending.get("context", "") if pending else "")),
+            "options": payload.get("options", pending.get("options", []) if pending else []),
         }
 
     def _apply_hitl_resume(self, *, thread_id: str, payload: dict, resume_value) -> FalcoState:

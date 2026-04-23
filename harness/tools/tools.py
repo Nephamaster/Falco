@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 from pathlib import Path
@@ -279,18 +280,20 @@ def create_core_tools(
             return f"I am ready to execute {normalized_action}. Reason: {normalized_rationale} Approve?"
         return f"I am ready to execute {normalized_action}. Approve?"
 
+    def _render_hitl_payload(payload: dict) -> str:
+        return json.dumps(payload, ensure_ascii=False)
+
     def _approval_required(item: dict, preview: str = "") -> str:
-        lines = [
-            "HUMAN_APPROVAL_REQUIRED",
-            f"id={item['id']}",
-            f"action={item.get('action', '')}",
-            f"question={item.get('question', '')}",
-            f"rationale={item.get('rationale', '')}",
-        ]
+        payload = {
+            "kind": "approval",
+            "request_id": item["id"],
+            "action": item.get("action", ""),
+            "question": item.get("question", ""),
+            "rationale": item.get("rationale", ""),
+        }
         if preview:
-            lines.append(f"preview={preview}")
-        lines.append("Ask the user to approve or deny this id before continuing.")
-        return "\n".join(lines)
+            payload["preview"] = preview
+        return _render_hitl_payload(payload)
 
     def _latest_user_approves(request_id: str) -> bool:
         latest_user = latest_user_getter().lower()
@@ -513,13 +516,22 @@ def create_core_tools(
     @tool
     def skill_catalog(enabled_only: bool = True) -> str:
         """List available skills and status."""
-        items = skills.list_skills(enabled_only=enabled_only)
+        items = [item for item in skills.list_skills(enabled_only=enabled_only) if item.name.strip().lower() != "rag"]
         if not items:
             return "No skills found."
         return "\n".join(
             f"- {item.name} | enabled={item.enabled} | {item.description}".strip()
             for item in items
         )
+
+    @tool
+    def rag_search(query: str, top_k: int = 5) -> str:
+        """Search the local knowledge base for evidence relevant to the query."""
+        normalized_query = str(query or "").strip()
+        if not normalized_query:
+            return "RAG search requires a non-empty query."
+        normalized_top_k = max(1, min(int(top_k), 20))
+        return _execute_skill_action(skill_name="rag", action="search", args={"query": normalized_query, "top_k": normalized_top_k})
 
     @tool
     def skill_manage(
@@ -574,11 +586,15 @@ def create_core_tools(
             context=context,
             options=options or [],
         )
-        return (
-            "HUMAN_INPUT_REQUIRED\n"
-            f"id={item['id']}\n"
-            f"question={item['question']}\n"
-            "Stop and ask the user this question."
+        return _render_hitl_payload(
+            {
+                "kind": "clarification",
+                "request_id": item["id"],
+                "question": item["question"],
+                "clarification_type": item.get("clarification_type", "missing_info"),
+                "context": item.get("context", ""),
+                "options": item.get("options", []),
+            }
         )
 
     @tool
@@ -596,13 +612,15 @@ def create_core_tools(
             context=context,
             options=options or [],
         )
-        clarification_kind = clarification_type.strip() or "missing_info"
-        return (
-            "HUMAN_INPUT_REQUIRED\n"
-            f"id={item['id']}\n"
-            f"clarification_type={clarification_kind}\n"
-            f"question={item['question']}\n"
-            "Stop and ask the user this question."
+        return _render_hitl_payload(
+            {
+                "kind": "clarification",
+                "request_id": item["id"],
+                "question": item["question"],
+                "clarification_type": item.get("clarification_type", "missing_info"),
+                "context": item.get("context", ""),
+                "options": item.get("options", []),
+            }
         )
 
     @tool
@@ -666,7 +684,7 @@ def create_core_tools(
         approved_request_id: str = "",
         **extra,
     ) -> str:
-        """Use an enabled skill action. RAG is available as use_skill(skill_name='rag', action='search'|'index', args={...})."""
+        """Use an enabled skill action."""
         if extra.get("v__args") and isinstance(extra["v__args"], list):
             packed = list(extra["v__args"])
             if not skill_name and len(packed) >= 1:
@@ -730,6 +748,7 @@ def create_core_tools(
         change_working_directory,
         add_memory,
         query_memory,
+        rag_search,
         skill_catalog,
         skill_manage,
         ask_clarification,

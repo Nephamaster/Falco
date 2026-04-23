@@ -86,6 +86,17 @@ def _choose_thread_id(settings: FalcoSettings) -> str:
         return chosen
 
 
+def _is_hitl_output(output: str) -> bool:
+    text = str(output or "").strip()
+    if not text:
+        return False
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(payload, dict) and str(payload.get("kind", "")).strip().lower() in {"approval", "clarification"}
+
+
 def main() -> None:
     settings = FalcoSettings.from_yaml(Path(__file__).resolve().parent / "config.yaml")
     orchestrator = FalcoOrchestrator(settings)
@@ -117,7 +128,7 @@ def main() -> None:
             output = orchestrator.resume(user_input=user_input, thread_id=thread_id)
         else:
             output = orchestrator.invoke(user_input=user_input, thread_id=thread_id)
-        awaiting_resume = output.startswith("HUMAN_INPUT_REQUIRED") or output.startswith("HUMAN_APPROVAL_REQUIRED")
+        awaiting_resume = _is_hitl_output(output)
         print(f"Falco: {output}")
 
 

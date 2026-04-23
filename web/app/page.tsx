@@ -16,11 +16,22 @@ type ChatSession = {
   title: string;
   threadId: string;
   responsePreference: string;
+  awaitingResume: boolean;
   items: ChatItem[];
   updatedAt: number;
 };
 
 type ConnectionState = "idle" | "checking" | "online" | "offline";
+type HitlPayload = {
+  kind: "approval" | "clarification";
+  request_id?: string;
+  question?: string;
+  clarification_type?: string;
+  action?: string;
+  rationale?: string;
+  context?: string;
+  options?: string[];
+};
 
 const defaultApiBase = process.env.NEXT_PUBLIC_FALCO_API_BASE || "/falco-api";
 const storageKey = "falco-web-sessions";
@@ -54,6 +65,58 @@ function MarkdownMessage({ content }: { content: string }) {
   );
 }
 
+function parseHitlPayload(content: string): HitlPayload | null {
+  const text = content.trim();
+  if (!text.startsWith("{")) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(text) as HitlPayload;
+    if (!parsed || typeof parsed !== "object") {
+      return null;
+    }
+    if (parsed.kind !== "approval" && parsed.kind !== "clarification") {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function renderHitlKindLabel(payload: HitlPayload) {
+  if (payload.kind === "approval") {
+    return "Awaiting Approval";
+  }
+  return payload.clarification_type ? `Need Info · ${payload.clarification_type}` : "Need Info";
+}
+
+function HitlMessage({ payload }: { payload: HitlPayload }) {
+  const options = Array.isArray(payload.options) ? payload.options.filter(Boolean) : [];
+  const body = payload.question?.trim() || payload.rationale?.trim() || "Waiting for user response.";
+
+  return (
+    <div className="hitl-card">
+      <div className="hitl-header">
+        <span className={`hitl-badge ${payload.kind}`}>{renderHitlKindLabel(payload)}</span>
+        {payload.request_id ? <code>{payload.request_id}</code> : null}
+      </div>
+      <div className="hitl-question">{body}</div>
+      {payload.context ? <p className="hitl-context">{payload.context}</p> : null}
+      {payload.action ? <p className="hitl-context">Action: {payload.action}</p> : null}
+      {options.length > 0 ? (
+        <div className="hitl-options">
+          {options.map((option) => (
+            <span className="hitl-option" key={option}>
+              {option}
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function createSession(seed?: Partial<ChatSession>): ChatSession {
   const timestamp = Date.now();
   const id = seed?.id || `session-${timestamp}`;
@@ -62,6 +125,7 @@ function createSession(seed?: Partial<ChatSession>): ChatSession {
     title: seed?.title || "新会话",
     threadId: seed?.threadId || id,
     responsePreference: seed?.responsePreference || "natural",
+    awaitingResume: seed?.awaitingResume || false,
     items: seed?.items || [
       {
         role: "assistant",
@@ -110,6 +174,7 @@ export default function HomePage() {
 
   const items = activeSession.items;
   const threadId = activeSession.threadId;
+  const awaitingResume = activeSession.awaitingResume;
   const canSend = !pending && draft.trim().length > 0;
   const assistantMessageCount = items.filter((item) => item.role === "assistant").length;
   const orderedSessions = useMemo(
@@ -247,6 +312,7 @@ export default function HomePage() {
         threadId,
         message,
         userResponsePreference: activeSession.responsePreference,
+        resume: awaitingResume,
         callbacks: {
           onDelta: (delta) => {
             setSessions((prev) =>
@@ -265,6 +331,7 @@ export default function HomePage() {
             );
           },
           onDone: (answer) => {
+            const hitlPayload = parseHitlPayload(answer || "");
             setSessions((prev) =>
               prev.map((session) => {
                 if (session.id !== activeSession.id) {
@@ -276,7 +343,12 @@ export default function HomePage() {
                   return session;
                 }
                 next[next.length - 1] = { role: "assistant", content: answer || "Falco 没有返回内容。" };
-                return { ...session, items: next, updatedAt: Date.now() };
+                return {
+                  ...session,
+                  items: next,
+                  awaitingResume: Boolean(hitlPayload),
+                  updatedAt: Date.now(),
+                };
               }),
             );
           },
@@ -296,7 +368,7 @@ export default function HomePage() {
           } else {
             next.push({ role: "assistant", content: `请求失败：${text}` });
           }
-          return { ...session, items: next, updatedAt: Date.now() };
+          return { ...session, items: next, awaitingResume: false, updatedAt: Date.now() };
         }),
       );
     } finally {
@@ -426,9 +498,13 @@ export default function HomePage() {
                   <span>{item.role === "user" ? "Operator" : "Falco"}</span>
                 </div>
                 <div className="message-content">
-                  {item.role === "assistant" ? (
-                    <MarkdownMessage content={item.content || "..."} />
-                  ) : (
+                  {item.role === "assistant" ? (() => {
+                    const hitlPayload = parseHitlPayload(item.content || "");
+                    if (hitlPayload) {
+                      return <HitlMessage payload={hitlPayload} />;
+                    }
+                    return <MarkdownMessage content={item.content || "..."} />;
+                  })() : (
                     item.content || ""
                   )}
                 </div>

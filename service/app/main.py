@@ -79,11 +79,18 @@ def mcp_catalog() -> MCPCatalogResponse:
 @app.post("/api/v1/chat", response_model=ChatResponse)
 def chat(payload: ChatRequest) -> ChatResponse:
     orchestrator = runtime.get_orchestrator()
-    answer = orchestrator.invoke(
-        user_input=payload.message,
-        thread_id=payload.thread_id,
-        user_response_preference=payload.user_response_preference,
-    )
+    if payload.resume:
+        answer = orchestrator.resume(
+            user_input=payload.message,
+            thread_id=payload.thread_id,
+            user_response_preference=payload.user_response_preference,
+        )
+    else:
+        answer = orchestrator.invoke(
+            user_input=payload.message,
+            thread_id=payload.thread_id,
+            user_response_preference=payload.user_response_preference,
+        )
     return ChatResponse(thread_id=payload.thread_id, answer=answer)
 
 
@@ -91,17 +98,30 @@ def _sse_event(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-async def _stream_answer(thread_id: str, message: str, user_response_preference: str) -> AsyncIterator[str]:
+def _chunk_text(text: str, size: int = 24) -> list[str]:
+    if not text:
+        return [""]
+    return [text[index:index + size] for index in range(0, len(text), size)]
+
+
+async def _stream_answer(thread_id: str, message: str, user_response_preference: str, resume: bool = False) -> AsyncIterator[str]:
     orchestrator = runtime.get_orchestrator()
-    answer = orchestrator.invoke(
-        user_input=message,
-        thread_id=thread_id,
-        user_response_preference=user_response_preference,
-    )
+    if resume:
+        answer = orchestrator.resume(
+            user_input=message,
+            thread_id=thread_id,
+            user_response_preference=user_response_preference,
+        )
+    else:
+        answer = orchestrator.invoke(
+            user_input=message,
+            thread_id=thread_id,
+            user_response_preference=user_response_preference,
+        )
     yield _sse_event("start", {"thread_id": thread_id})
 
-    for token in answer.split():
-        yield _sse_event("delta", {"content": f"{token} "})
+    for chunk in _chunk_text(answer):
+        yield _sse_event("delta", {"content": chunk})
         await asyncio.sleep(0.01)
 
     if not answer.strip():
@@ -116,6 +136,7 @@ async def chat_stream(payload: ChatRequest) -> StreamingResponse:
             thread_id=payload.thread_id,
             message=payload.message,
             user_response_preference=payload.user_response_preference,
+            resume=payload.resume,
         ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},

@@ -3,13 +3,15 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from html import unescape
 from typing import Any
 
 from langchain_core.messages import AIMessage
 
 
 def coerce_json_tool_call(message: AIMessage, valid_tool_names: set[str]) -> AIMessage:
-    """Convert plain JSON tool-call text into LangChain tool_calls when needed."""
+    """Convert provider-specific plain-text tool-call payloads into LangChain tool_calls when needed."""
+    cleaned_content = _sanitize_assistant_text(message.content)
     if message.tool_calls:
         normalized_tool_calls = []
         changed = False
@@ -21,24 +23,43 @@ def coerce_json_tool_call(message: AIMessage, valid_tool_names: set[str]) -> AIM
                 changed = True
             normalized_tool_calls.append(normalized)
         if not changed:
-            return message
+            if cleaned_content == message.content:
+                return message
+            return AIMessage(
+                content=cleaned_content,
+                tool_calls=normalized_tool_calls,
+                additional_kwargs={key: value for key, value in (message.additional_kwargs or {}).items() if key not in {"tool_calls", "function_call"}},
+                response_metadata=message.response_metadata,
+            )
         additional_kwargs = dict(message.additional_kwargs or {})
         additional_kwargs.pop("tool_calls", None)
         additional_kwargs.pop("function_call", None)
         return AIMessage(
-            content=message.content,
+            content=cleaned_content,
             tool_calls=normalized_tool_calls,
             additional_kwargs=additional_kwargs,
             response_metadata=message.response_metadata,
         )
 
-    parsed = _parse_tool_call_payload(message.content)
+    parsed = _parse_tool_call_payload(cleaned_content)
     if parsed is None:
-        return message
+        if cleaned_content == message.content:
+            return message
+        return AIMessage(
+            content=cleaned_content,
+            additional_kwargs={key: value for key, value in (message.additional_kwargs or {}).items() if key not in {"tool_calls", "function_call"}},
+            response_metadata=message.response_metadata,
+        )
 
     name = str(parsed.get("name") or parsed.get("tool") or parsed.get("tool_name") or "").strip()
     if name not in valid_tool_names:
-        return message
+        if cleaned_content == message.content:
+            return message
+        return AIMessage(
+            content=cleaned_content,
+            additional_kwargs={key: value for key, value in (message.additional_kwargs or {}).items() if key not in {"tool_calls", "function_call"}},
+            response_metadata=message.response_metadata,
+        )
 
     args = parsed.get("args")
     if args is None:
@@ -61,9 +82,13 @@ def coerce_json_tool_call(message: AIMessage, valid_tool_names: set[str]) -> AIM
 
 
 def _parse_tool_call_payload(content: Any) -> dict[str, Any] | None:
-    text = _extract_text(content).strip()
+    text = _sanitize_assistant_text(_extract_text(content))
     if not text:
         return None
+
+    minimax = _parse_minimax_tool_call(text)
+    if minimax is not None:
+        return minimax
 
     for candidate in _json_candidates(text):
         try:
@@ -105,6 +130,53 @@ def _json_candidates(text: str) -> list[str]:
     if first_arr != -1 and last_arr > first_arr:
         candidates.append(text[first_arr : last_arr + 1])
     return candidates
+
+
+def _sanitize_assistant_text(content: Any) -> str:
+    text = _extract_text(content)
+    if not text:
+        return ""
+    text = re.sub(r"<think\b[^>]*>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<thinking\b[^>]*>.*?</thinking>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = text.replace("<|thought|>", "").replace("<|/thought|>", "")
+    return text.strip()
+
+
+def sanitize_final_answer_text(content: Any) -> str:
+    text = _sanitize_assistant_text(content)
+    text = re.sub(
+        r"<minimax:tool_call\b[^>]*>.*?</minimax:tool_call>",
+        "",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    return text.strip()
+
+
+def _parse_minimax_tool_call(text: str) -> dict[str, Any] | None:
+    block_match = re.search(
+        r"<minimax:tool_call\b[^>]*>(.*?)</minimax:tool_call>",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if not block_match:
+        return None
+    body = block_match.group(1)
+    invoke_match = re.search(r"<invoke\b[^>]*name=\"([^\"]+)\"[^>]*>(.*?)</invoke>", body, flags=re.DOTALL | re.IGNORECASE)
+    if not invoke_match:
+        return None
+    name = unescape(invoke_match.group(1)).strip()
+    raw_args = invoke_match.group(2)
+    args: dict[str, Any] = {}
+    for param_name, param_value in re.findall(
+        r"<parameter\b[^>]*name=\"([^\"]+)\"[^>]*>(.*?)</parameter>",
+        raw_args,
+        flags=re.DOTALL | re.IGNORECASE,
+    ):
+        args[unescape(param_name).strip()] = unescape(param_value).strip()
+    if not name:
+        return None
+    return {"name": name, "args": args}
 
 
 def _normalize_tool_call_data(data: Any) -> dict[str, Any] | None:

@@ -176,9 +176,12 @@ class SkillManager:
             skills = [skill for skill in skills if skill.enabled]
         return skills
 
-    def get_prompt_block(self, max_tokens: int = 5000) -> str:
+    def get_prompt_block(self, max_tokens: int = 5000, exclude_names: set[str] | None = None) -> str:
+        hidden = {_slugify(name) for name in (exclude_names or set())}
         blocks: list[str] = []
         for skill in self.list_skills(enabled_only=True):
+            if _slugify(skill.name) in hidden:
+                continue
             entry = f"[Skill: {skill.name}]\n{skill.content}".strip()
             blocks.append(entry)
         merged = "\n\n".join(blocks)
