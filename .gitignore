@@ -1,5 +1,6 @@
 .env
 .vscode
+.tiktoken
 
 __pycache__
 
@@ -7,3 +8,4 @@ TODO.md
 BaseModel.md
 Agent.md
 technical_point.md
+STAR.md

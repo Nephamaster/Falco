@@ -1,59 +1,50 @@
-import os
-import re
-import math
+from __future__ import annotations
+
 import json
+import math
+import re
 import uuid
+from functools import lru_cache
 from pathlib import Path
-from typing import List
-from transformers import AutoTokenizer
+from typing import Any
 
-# 线程安全的 Tokenizer 缓存
-_TOKENIZER_CACHE: dict[str, AutoTokenizer] = {}
+import tiktoken
 
-def _get_tokenizer_cached(model_name: str) -> AutoTokenizer:
-    if model_name not in _TOKENIZER_CACHE:
-        # use_fast=True 启用 Rust 加速，信任远程代码以兼容 Qwen/Llama 等自定义结构
-        _TOKENIZER_CACHE[model_name] = AutoTokenizer.from_pretrained(
-            model_name, use_fast=True, trust_remote_code=True
-        )
-    return _TOKENIZER_CACHE[model_name]
+from harness.agents.memory.runtime import utc_now
 
 
 class MemoryUtilityMixin:
     def _tokenizer_model(self) -> str:
-        env_val = os.getenv("TOKENIZER_MODEL")
-        if env_val:
-            return env_val.strip()  # 去除可能的空格/换行
-        
-        instance_val = getattr(self, "tokenizer_model", None)
-        if instance_val:
-            return instance_val
-        
-        return "Qwen/Qwen2.5-0.5B"  # 安全的默认值
-        # 优先读取实例属性，其次环境变量，最后默认使用轻量级本地模型
-        # return getattr(self, "tokenizer_model", os.getenv("TOKENIZER_MODEL", "Qwen/Qwen2.5-0.5B"))
+        return getattr(self, "tokenizer_model", "gpt-4o-mini")
 
-    def _get_encoding(self, model_name: str) -> AutoTokenizer:
-        """兼容原接口名，实际返回 transformers tokenizer 实例"""
-        return _get_tokenizer_cached(model_name)
+    @staticmethod
+    @lru_cache(maxsize=4)
+    def _get_encoding_for_model(model_name: str):
+        try:
+            return tiktoken.encoding_for_model(model_name)
+        except Exception:
+            return tiktoken.get_encoding("cl100k_base")
+
+    def _get_encoding(self, model_name: str):
+        return self._get_encoding_for_model(model_name)
 
     def _count_tokens(self, text: str) -> int:
         if not text:
             return 0
-        tokenizer = self._get_encoding(self._tokenizer_model())
-        # add_special_tokens=False 避免 <s>/<pad>/<eos> 等控制字符干扰精确计数
-        return len(tokenizer(text, add_special_tokens=False).input_ids)
+        encoding = self._get_encoding(self._tokenizer_model())
+        return len(encoding.encode(text))
 
     def _truncate_tail(self, text: str, limit_tokens: int) -> str:
         clean = " ".join((text or "").split())
-        if not clean or limit_tokens <= 0:
+        if not clean:
             return ""
-        tokenizer = self._get_encoding(self._tokenizer_model())
-        token_ids = tokenizer.encode(clean, add_special_tokens=False)
-        if len(token_ids) <= limit_tokens:
+        if limit_tokens <= 0:
+            return ""
+        encoding = self._get_encoding(self._tokenizer_model())
+        tokens = encoding.encode(clean)
+        if len(tokens) <= limit_tokens:
             return clean
-        # 保留最后 limit_tokens 个 token
-        return tokenizer.decode(token_ids[-limit_tokens:], skip_special_tokens=True)
+        return encoding.decode(tokens[-limit_tokens:])
 
     def _path(self, thread_id: str) -> Path:
         safe = "".join(ch for ch in thread_id if ch.isalnum() or ch in ("-", "_")) or "default"
@@ -171,14 +162,14 @@ class MemoryUtilityMixin:
 
     def _truncate(self, text: str, limit: int) -> str:
         clean = " ".join((text or "").split())
-        if not clean or limit <= 0:
+        if not clean:
             return ""
-        tokenizer = self._get_encoding(self._tokenizer_model())
-        token_ids = tokenizer.encode(clean, add_special_tokens=False)
-        if len(token_ids) <= limit:
+        if limit <= 0:
+            return ""
+        encoding = self._get_encoding(self._tokenizer_model())
+        tokens = encoding.encode(clean)
+        if len(tokens) <= limit:
             return clean
         if limit <= 3:
-            return tokenizer.decode(token_ids[:limit], skip_special_tokens=True)
-        # 截断前 limit-1 个 token 并追加省略号
-        truncated = tokenizer.decode(token_ids[:limit - 1], skip_special_tokens=True)
-        return truncated.rstrip() + "..."
+            return encoding.decode(tokens[:limit])
+        return encoding.decode(tokens[: limit - 1]).rstrip() + "..."
