@@ -1,0 +1,1 @@
+{"id":"memory_preference_001","category":"memory","input":"Remember that my preferred eval report style is terse tables. Acknowledge briefly.","max_tool_calls":2,"must_include":["terse"],"resume_steps":[{"input":"What report style did I just ask you to remember?"}],"rubric":{"judge_dimensions":["memory_recall"]}}

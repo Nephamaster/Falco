@@ -1,0 +1,1 @@
+{"id":"subagent_review_001","category":"subagents","input":"Delegate a worker to inspect harness/agents/subagent.py and report one risk or improvement. Then read the worker result and summarize it.","expected_tools":["delegate_task","run_subagent_tasks"],"max_tool_calls":6,"rubric":{"judge_dimensions":["delegation_quality","integration_quality"]}}

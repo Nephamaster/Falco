@@ -1,0 +1,1 @@
+{"id":"rag_knowledge_search_001","category":"rag","input":"Use the local knowledge base to answer: what does the eval document say about token efficiency?","expected_tools":["use_skill"],"max_tool_calls":4,"rubric":{"requires_rag":true,"judge_dimensions":["groundedness","retrieval_usefulness"]}}
